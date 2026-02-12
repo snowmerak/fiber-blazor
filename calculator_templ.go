@@ -58,7 +58,7 @@ func Calculator() templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templ.RenderAttributes(ctx, templ_7745c5c3_Buffer, blazor.HX().Post("/calculate").Target(result.Selector()).Include(a.Selector(), b_field.Selector()).Build())
+		templ_7745c5c3_Err = templ.RenderAttributes(ctx, templ_7745c5c3_Buffer, blazor.Post("/calculate").Target(result.Selector()).Include(a.Selector(), b_field.Selector()).Build())
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

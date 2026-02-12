@@ -51,13 +51,24 @@ type HXAttr struct {
 	attrs templ.Attributes
 }
 
-func HX() *HXAttr {
-	return &HXAttr{attrs: make(templ.Attributes)}
+func Post(url string) *HXAttr {
+	return &HXAttr{attrs: templ.Attributes{"hx-post": url}}
 }
 
-func (h *HXAttr) Post(url string) *HXAttr {
-	h.attrs["hx-post"] = url
-	return h
+func Get(url string) *HXAttr {
+	return &HXAttr{attrs: templ.Attributes{"hx-get": url}}
+}
+
+func Put(url string) *HXAttr {
+	return &HXAttr{attrs: templ.Attributes{"hx-put": url}}
+}
+
+func Patch(url string) *HXAttr {
+	return &HXAttr{attrs: templ.Attributes{"hx-patch": url}}
+}
+
+func Delete(url string) *HXAttr {
+	return &HXAttr{attrs: templ.Attributes{"hx-delete": url}}
 }
 
 func (h *HXAttr) Target(selector string) *HXAttr {
