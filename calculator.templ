@@ -1,0 +1,33 @@
+package main
+
+import "fmt"
+
+templ Calculator() {
+	<div style="margin: 20px; font-family: sans-serif;">
+		<h1>Simple Addition Calculator</h1>
+		<div id="calculator-form">
+			<input type="number" name="a" placeholder="Number 1" style="padding: 5px;"/>
+			+
+			<input type="number" name="b" placeholder="Number 2" style="padding: 5px;"/>
+			<button 
+				hx-post="/calculate" 
+				hx-target="#result" 
+				hx-include="[name='a'], [name='b']"
+				style="padding: 5px 10px; cursor: pointer;"
+			>
+				Calculate
+			</button>
+		</div>
+		<div id="result" style="margin-top: 20px; font-size: 1.2em; font-weight: bold;">
+			Result: 0
+		</div>
+	</div>
+}
+
+templ Result(sum int) {
+	Result: { strint(sum) }
+}
+
+func strint(i int) string {
+    return fmt.Sprintf("%d", i)
+}
