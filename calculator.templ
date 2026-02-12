@@ -5,8 +5,7 @@ import (
 	"github.com/snowmerak/fiber-blazor/blazor"
 )
 
-templ Calculator() {
-	{{ b := blazor.NewBinding() }}
+templ Calculator(b *blazor.Binding) {
 	{{ a := b.Field("a") }}
 	{{ b_field := b.Field("b") }}
 	{{ result := b.ID("result") }}

@@ -26,7 +26,7 @@ func Static(app *fiber.App, prefix, rootDir string) {
 	app.Use(prefix, static.New(rootDir))
 }
 
-func SetRenderer[V any](componentFunc func(data *V) templ.Component, transform func(ctx fiber.Ctx) (*V, error)) fiber.Handler {
+func SetContextRenderer[V any](componentFunc func(data *V) templ.Component, transform func(ctx fiber.Ctx) (*V, error)) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		data, err := transform(c)
 		if err != nil {
@@ -38,7 +38,7 @@ func SetRenderer[V any](componentFunc func(data *V) templ.Component, transform f
 	}
 }
 
-func SetHelperRenderer[T, V any](componentFunc func(data *V) templ.Component, transform func(req *T) (*V, error)) fiber.Handler {
+func SetRenderer[T, V any](componentFunc func(data *V) templ.Component, transform func(req *T) (*V, error)) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		req := new(T)
 		if err := c.Bind().All(req); err != nil {

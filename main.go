@@ -9,8 +9,8 @@ import (
 )
 
 type CalcRequest struct {
-	A int `form:"calc_a"`
-	B int `form:"calc_b"`
+	A int `form:"a"`
+	B int `form:"b"`
 }
 
 type CalcData struct {
@@ -23,8 +23,10 @@ func main() {
 	// Statics 핸들러 등록
 	blazor.Static(app, "/statics", "./statics")
 
+	cb := blazor.NewBinding()
+
 	// Main page
-	app.Get("/", blazor.InitRender(Calculator(), "en", "Fiber Blazor Calculator"))
+	app.Get("/", blazor.InitRender(Calculator(cb), "en", "Fiber Blazor Calculator"))
 
 	// HTMX calculation endpoint
 	app.Post("/calculate", blazor.SetRenderer(

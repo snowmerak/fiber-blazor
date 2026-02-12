@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -73,6 +74,35 @@ func (b *Binding) ID(name string) Field {
 	field := Field{ID: id}
 	b.fields[name] = field
 	return field
+}
+
+func (b *Binding) Bind(req any) any {
+	t := reflect.TypeOf(req)
+	if t.Kind() != reflect.Struct {
+		return req
+	}
+
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		tags := string(field.Tag)
+		transformedTags := strings.Builder{}
+		for _, tagPart := range strings.Split(tags, " ") {
+			tag := strings.SplitN(tagPart, ":", 2)
+			if len(tag) != 2 {
+				continue
+			}
+			key := tag[0]
+			key = b.prefix + "_" + key
+			value := tag[1]
+			if transformedTags.Len() > 0 {
+				transformedTags.WriteString(" ")
+			}
+			transformedTags.WriteString(fmt.Sprintf("%s:%s", key, value))
+		}
+		field.Tag = reflect.StructTag(transformedTags.String())
+	}
+
+	return req
 }
 
 // HTMX 관련 속성을 빌드하는 도우미
