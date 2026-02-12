@@ -62,12 +62,20 @@ Use the generated `GetBindingOf[Struct]()` helper to automatically manage IDs an
 
 ```templ
 {{ binder := GetBindingOfCalcRequest() }}
-<form hx-post="/calculate" hx-target="#result">
-    <input type="number" { binder.A.Attrs()... } />
-    <input type="number" { binder.B.Attrs()... } />
-    <button type="submit">Calculate</button>
-</form>
-<div id="result"></div>
+{{ result := binder.ID("result") }}
+<div id={ binder.ID("wrapper").ID }>
+	<input type="number" { binder.A.Attrs()... } />
+	<input type="number" { binder.B.Attrs()... } />
+	
+	{{ // Use the functional builder for HTMX attributes }}
+	<button { blazor.Post("/calculate").
+				Target(result.Selector()).
+				Include(binder.A.Selector(), binder.B.Selector()).
+				Build()... }>
+		Calculate
+	</button>
+</div>
+<div { result.Attrs()... }></div>
 ```
 
 ### 4. Implement the Handler
