@@ -29,7 +29,7 @@ templ Calculator(data CalcData) {
 		<button
 			{ blazor.Post("/calculate").
 				Target(result.Selector()).
-				Include(binder.ID("calculator").Selector() + " input").
+				Include(binder.A.Selector(), binder.B.Selector()).
 				Build()... }
 			class="w-full px-4 py-2 bg-blue-600 text-white font-semibold rounded-md hover:bg-blue-700 transition duration-150"
 		>
