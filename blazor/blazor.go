@@ -26,7 +26,19 @@ func Static(app *fiber.App, prefix, rootDir string) {
 	app.Use(prefix, static.New(rootDir))
 }
 
-func SetRenderer[T, V any](componentFunc func(data *V) templ.Component, transform func(req *T) (*V, error)) fiber.Handler {
+func SetRenderer[V any](componentFunc func(data *V) templ.Component, transform func(ctx fiber.Ctx) (*V, error)) fiber.Handler {
+	return func(c fiber.Ctx) error {
+		data, err := transform(c)
+		if err != nil {
+			return fiber.ErrBadRequest
+		}
+		component := componentFunc(data)
+		c.Set(fiber.HeaderContentType, fiber.MIMETextHTMLCharsetUTF8)
+		return component.Render(c.Context(), c.Res().Response().BodyWriter())
+	}
+}
+
+func SetHelperRenderer[T, V any](componentFunc func(data *V) templ.Component, transform func(req *T) (*V, error)) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		req := new(T)
 		if err := c.Bind().All(req); err != nil {
