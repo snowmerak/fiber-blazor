@@ -10,6 +10,12 @@ const defaultTitle = "Fiber Blazor App"
 const defaultLang = "en"
 
 func InitRender(root templ.Component, lang string, title string) fiber.Handler {
+	if title == "" {
+		title = defaultTitle
+	}
+	if lang == "" {
+		lang = defaultLang
+	}
 	return func(c fiber.Ctx) error {
 		c.Set(fiber.HeaderContentType, fiber.MIMETextHTMLCharsetUTF8)
 		return Page(title, lang, root).Render(c.Context(), c.Res().Response().BodyWriter())
