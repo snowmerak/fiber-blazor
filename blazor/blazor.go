@@ -1,6 +1,9 @@
 package blazor
 
 import (
+	"log"
+	"reflect"
+
 	"github.com/a-h/templ"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/static"
@@ -38,13 +41,17 @@ func SetContextRenderer[V any](componentFunc func(data *V) templ.Component, tran
 	}
 }
 
-func SetRenderer[T, V any](componentFunc func(data *V) templ.Component, transform func(req *T) (*V, error)) fiber.Handler {
+func SetRenderer[T, V any](componentFunc func(data *V) templ.Component, transform func(req *T) (*V, error), binding *Binding) fiber.Handler {
 	return func(c fiber.Ctx) error {
-		req := new(T)
+		req := binding.Bind(new(T))
 		if err := c.Bind().All(req); err != nil {
 			return fiber.ErrBadRequest
 		}
-		data, err := transform(req)
+		log.Printf("Received request: %+v", req)
+		originReq := new(T)
+		reflect.ValueOf(originReq).Elem().Set(reflect.ValueOf(req).Elem())
+		log.Printf("Transformed request: %+v", originReq)
+		data, err := transform(originReq)
 		if err != nil {
 			return fiber.ErrBadRequest
 		}

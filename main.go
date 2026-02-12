@@ -36,6 +36,7 @@ func main() {
 		func(req *CalcRequest) (*CalcData, error) {
 			return &CalcData{Sum: req.A + req.B}, nil
 		},
+		cb,
 	))
 
 	log.Fatal(app.Listen(":3000"))
