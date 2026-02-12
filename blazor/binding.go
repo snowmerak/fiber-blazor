@@ -1,7 +1,6 @@
 package blazor
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/a-h/templ"
@@ -29,21 +28,18 @@ func (f Field) Selector() string {
 
 // Binding은 특정 영역(네임스페이스) 내의 필드들을 관리합니다.
 type Binding struct {
-	prefix string
 }
 
-func NewBinding(prefix string) *Binding {
-	return &Binding{prefix: prefix}
+func NewBinding() *Binding {
+	return &Binding{}
 }
 
 func (b *Binding) Field(name string) Field {
-	id := fmt.Sprintf("%s_%s", b.prefix, name)
-	return Field{ID: id, Name: id}
+	return Field{ID: name, Name: name}
 }
 
 func (b *Binding) ID(name string) Field {
-	id := fmt.Sprintf("%s_%s", b.prefix, name)
-	return Field{ID: id, Name: ""}
+	return Field{ID: name, Name: ""}
 }
 
 // HTMX 관련 속성을 빌드하는 도우미

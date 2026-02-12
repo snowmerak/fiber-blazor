@@ -13,7 +13,7 @@ import (
 	"github.com/snowmerak/fiber-blazor/blazor"
 )
 
-func Calculator(b *blazor.Binding, data CalcData) templ.Component {
+func Calculator(data CalcData) templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -34,17 +34,16 @@ func Calculator(b *blazor.Binding, data CalcData) templ.Component {
 			templ_7745c5c3_Var1 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		binder := NewCalcRequestBinder(b)
-		calculator := b.ID("calculator")
-		result := b.Field("result")
+		binder := NewBindingOfCalcRequest()
+		result := binder.ID("result")
 		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<div class=\"p-6 max-w-sm mx-auto bg-white rounded-xl shadow-md space-y-4 border border-gray-200\" id=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
 		var templ_7745c5c3_Var2 string
-		templ_7745c5c3_Var2, templ_7745c5c3_Err = templ.JoinStringErrs(calculator.ID)
+		templ_7745c5c3_Var2, templ_7745c5c3_Err = templ.JoinStringErrs(binder.ID("calculator").ID)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `tests/calculator.templ`, Line: 12, Col: 116}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `tests/calculator.templ`, Line: 11, Col: 129}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var2))
 		if templ_7745c5c3_Err != nil {
@@ -72,7 +71,7 @@ func Calculator(b *blazor.Binding, data CalcData) templ.Component {
 		}
 		templ_7745c5c3_Err = templ.RenderAttributes(ctx, templ_7745c5c3_Buffer, blazor.Post("/calculate").
 			Target(result.Selector()).
-			Include(calculator.Selector()+" input").
+			Include(binder.ID("calculator").Selector()+" input").
 			Build())
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
@@ -129,7 +128,7 @@ func Result(data CalcData) templ.Component {
 		var templ_7745c5c3_Var4 string
 		templ_7745c5c3_Var4, templ_7745c5c3_Err = templ.JoinStringErrs(fmt.Sprintf("%d", data.Sum))
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `tests/calculator.templ`, Line: 47, Col: 39}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `tests/calculator.templ`, Line: 46, Col: 39}
 		}
 		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var4))
 		if templ_7745c5c3_Err != nil {

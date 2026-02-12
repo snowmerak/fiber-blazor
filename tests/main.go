@@ -8,7 +8,7 @@ import (
 	"github.com/snowmerak/fiber-blazor/blazor"
 )
 
-//blazor:gen
+//blazor:bind
 type CalcRequest struct {
 	A int `form:"calc_a"`
 	B int `form:"calc_b"`
@@ -23,15 +23,13 @@ func main() {
 
 	blazor.Static(app, "/statics", "./statics")
 
-	cb := blazor.NewBinding("calc")
-
-	app.Get("/", blazor.InitRender(Calculator(cb, CalcData{}), "en", "Fiber Blazor Calculator"))
+	app.Get("/", blazor.InitRender(Calculator(CalcData{}), "en", "Fiber Blazor Calculator"))
 
 	app.Post("/calculate", blazor.SetRenderer(
 		func(data *CalcData) templ.Component {
 			return Result(*data)
 		},
-		func(req *CalcRequest) (*CalcData, error) {
+		func(req *BindedCalcRequest) (*CalcData, error) {
 			return &CalcData{Sum: req.A + req.B}, nil
 		},
 	))

@@ -3,17 +3,27 @@ package main
 
 import "github.com/snowmerak/fiber-blazor/blazor"
 
-type CalcRequestBinder struct {
+type BindedCalcRequest struct {
+	A int `form:"calc_a_e505eed8"`
+	B int `form:"calc_b_e505eed8"`
+}
+
+const (
+	bind_CalcRequest_A = "calc_a_e505eed8"
+	bind_CalcRequest_B = "calc_b_e505eed8"
+)
+
+type BindingOfCalcRequest struct {
 	*blazor.Binding
 	A blazor.Field
 	B blazor.Field
 }
 
-func NewCalcRequestBinder(b *blazor.Binding) *CalcRequestBinder {
-	return &CalcRequestBinder{
+func NewBindingOfCalcRequest() BindingOfCalcRequest {
+	b := blazor.NewBinding()
+	return BindingOfCalcRequest{
 		Binding: b,
-		A: b.Field("calc_a"),
-		B: b.Field("calc_b"),
+		A:       b.Field(bind_CalcRequest_A),
+		B:       b.Field(bind_CalcRequest_B),
 	}
 }
-

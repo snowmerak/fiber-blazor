@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"go/ast"
+	"go/format"
 	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/a-h/templ/cmd/templ/generatecmd"
@@ -20,8 +24,16 @@ func main() {
 	}
 }
 
+func randomString(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "static"
+	}
+	return hex.EncodeToString(b)
+}
+
 func run() error {
-	// 1. Scan for //blazor:gen
+	// 1. Scan for //blazor:bind
 	if err := generateBinders("."); err != nil {
 		return fmt.Errorf("generate binders: %w", err)
 	}
@@ -71,7 +83,7 @@ func generateBinders(root string) error {
 			shouldGen := false
 			if genDecl.Doc != nil {
 				for _, comment := range genDecl.Doc.List {
-					if strings.Contains(comment.Text, "//blazor:gen") {
+					if strings.Contains(comment.Text, "//blazor:bind") {
 						shouldGen = true
 						break
 					}
@@ -106,6 +118,11 @@ func generateBinders(root string) error {
 						tag = field.Tag.Value
 					}
 
+					// Get field type string
+					var typeBuf strings.Builder
+					format.Node(&typeBuf, fset, field.Type)
+					fieldType := typeBuf.String()
+
 					// Basic tag parsing for 'field' or 'form'
 					bindName := strings.ToLower(fieldName)
 					if strings.Contains(tag, `form:"`) {
@@ -116,8 +133,10 @@ func generateBinders(root string) error {
 					}
 
 					fields = append(fields, fieldInfo{
-						FieldName: fieldName,
-						BindName:  bindName,
+						FieldName:   fieldName,
+						BindName:    bindName,
+						FieldType:   fieldType,
+						OriginalTag: tag,
 					})
 				}
 				structFields[typeName] = fields
@@ -135,8 +154,10 @@ func generateBinders(root string) error {
 }
 
 type fieldInfo struct {
-	FieldName string
-	BindName  string
+	FieldName   string
+	BindName    string
+	FieldType   string
+	OriginalTag string
 }
 
 func writeGenFile(srcPath, pkgName string, types []string, fields map[string][]fieldInfo) error {
@@ -153,8 +174,40 @@ func writeGenFile(srcPath, pkgName string, types []string, fields map[string][]f
 	fmt.Fprintf(f, "package %s\n\n", pkgName)
 	fmt.Fprintf(f, "import \"github.com/snowmerak/fiber-blazor/blazor\"\n\n")
 
+	tagRegex := regexp.MustCompile(`(\w+):"([^"]*)"`)
+
 	for _, t := range types {
-		binderName := t + "Binder"
+		structSuffix := randomString(4)
+
+		fmt.Fprintf(f, "type Binded%s struct {\n", t)
+		for _, field := range fields[t] {
+			newTag := field.OriginalTag
+			if newTag != "" {
+				// Remove the backticks if present to make regex matching easier, then put them back
+				isBackticked := strings.HasPrefix(newTag, "`") && strings.HasSuffix(newTag, "`")
+				tagContent := newTag
+				if isBackticked {
+					tagContent = newTag[1 : len(newTag)-1]
+				}
+
+				newTag = tagRegex.ReplaceAllString(tagContent, `${1}:"${2}_`+structSuffix+`"`)
+
+				if isBackticked {
+					newTag = "`" + newTag + "`"
+				}
+			}
+			fmt.Fprintf(f, "\t%s %s %s\n", field.FieldName, field.FieldType, newTag)
+		}
+		fmt.Fprintf(f, "}\n\n")
+
+		constPrefix := "bind_" + t + "_"
+		fmt.Fprintf(f, "const (\n")
+		for _, field := range fields[t] {
+			fmt.Fprintf(f, "\t%s%s = \"%s_%s\"\n", constPrefix, field.FieldName, field.BindName, structSuffix)
+		}
+		fmt.Fprintf(f, ")\n\n")
+
+		binderName := "BindingOf" + t
 		fmt.Fprintf(f, "type %s struct {\n", binderName)
 		fmt.Fprintf(f, "\t*blazor.Binding\n")
 		for _, field := range fields[t] {
@@ -162,11 +215,12 @@ func writeGenFile(srcPath, pkgName string, types []string, fields map[string][]f
 		}
 		fmt.Fprintf(f, "}\n\n")
 
-		fmt.Fprintf(f, "func New%s(b *blazor.Binding) *%s {\n", binderName, binderName)
-		fmt.Fprintf(f, "\treturn &%s{\n", binderName)
+		fmt.Fprintf(f, "func New%s() %s {\n", binderName, binderName)
+		fmt.Fprintf(f, "\tb := blazor.NewBinding(\"\")\n")
+		fmt.Fprintf(f, "\treturn %s{\n", binderName)
 		fmt.Fprintf(f, "\t\tBinding: b,\n")
 		for _, field := range fields[t] {
-			fmt.Fprintf(f, "\t\t%s: b.Field(\"%s\"),\n", field.FieldName, field.BindName)
+			fmt.Fprintf(f, "\t\t%s: b.Field(%s%s),\n", field.FieldName, constPrefix, field.FieldName)
 		}
 		fmt.Fprintf(f, "\t}\n")
 		fmt.Fprintf(f, "}\n\n")
