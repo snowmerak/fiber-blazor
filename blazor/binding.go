@@ -33,6 +33,7 @@ func (f Field) Selector() string {
 // Binding은 특정 영역(네임스페이스) 내의 필드들을 관리합니다.
 type Binding struct {
 	prefix string
+	fields map[string]Field
 }
 
 func NewBinding(prefix ...string) *Binding {
@@ -50,12 +51,28 @@ func NewBinding(prefix ...string) *Binding {
 
 func (b *Binding) Field(name string) Field {
 	id := fmt.Sprintf("%s_%s", b.prefix, name)
-	return Field{ID: id, Name: id}
+	if b.fields == nil {
+		b.fields = make(map[string]Field)
+	}
+	if data, ok := b.fields[name]; ok {
+		return data
+	}
+	field := Field{ID: id, Name: id}
+	b.fields[name] = field
+	return field
 }
 
 func (b *Binding) ID(name string) Field {
 	id := fmt.Sprintf("%s_%s", b.prefix, name)
-	return Field{ID: id, Name: ""}
+	if b.fields == nil {
+		b.fields = make(map[string]Field)
+	}
+	if data, ok := b.fields[name]; ok {
+		return data
+	}
+	field := Field{ID: id}
+	b.fields[name] = field
+	return field
 }
 
 // HTMX 관련 속성을 빌드하는 도우미
