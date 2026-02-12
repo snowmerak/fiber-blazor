@@ -9,8 +9,8 @@ import (
 )
 
 type CalcRequest struct {
-	A int `form:"a"`
-	B int `form:"b"`
+	A int `form:"calc_a"`
+	B int `form:"calc_b"`
 }
 
 type CalcData struct {
@@ -23,7 +23,7 @@ func main() {
 	// Statics 핸들러 등록
 	blazor.Static(app, "/statics", "./statics")
 
-	cb := blazor.NewBinding()
+	cb := blazor.NewBinding("calc")
 
 	// Main page
 	app.Get("/", blazor.InitRender(Calculator(cb), "en", "Fiber Blazor Calculator"))
@@ -36,7 +36,6 @@ func main() {
 		func(req *CalcRequest) (*CalcData, error) {
 			return &CalcData{Sum: req.A + req.B}, nil
 		},
-		cb,
 	))
 
 	log.Fatal(app.Listen(":3000"))
