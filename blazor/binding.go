@@ -1,8 +1,11 @@
 package blazor
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/a-h/templ"
 )
@@ -32,8 +35,17 @@ type Binding struct {
 	prefix string
 }
 
-func NewBinding(prefix string) *Binding {
-	return &Binding{prefix: prefix}
+func NewBinding(prefix ...string) *Binding {
+	if len(prefix) > 0 && len(prefix[0]) > 0 {
+		return &Binding{prefix: prefix[0]}
+	}
+
+	buf := make([]byte, 8)
+	now := time.Now().UnixMicro()
+	binary.LittleEndian.PutUint32(buf[0:4], uint32(now&0xFFFFFFFF))
+	rand.Read(buf[4:8])
+	id := fmt.Sprintf("b_%x", binary.LittleEndian.Uint64(buf))
+	return &Binding{prefix: id}
 }
 
 func (b *Binding) Field(name string) Field {

@@ -34,7 +34,7 @@ func Calculator() templ.Component {
 			templ_7745c5c3_Var1 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		b := blazor.NewBinding("calc")
+		b := blazor.NewBinding()
 		a := b.Field("a")
 		b_field := b.Field("b")
 		result := b.ID("result")
