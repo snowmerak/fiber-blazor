@@ -9,8 +9,8 @@ import (
 )
 
 type CalcRequest struct {
-	A int `form:"a"`
-	B int `form:"b"`
+	A int `form:"calc_a"`
+	B int `form:"calc_b"`
 }
 
 type CalcData struct {

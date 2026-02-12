@@ -1,24 +1,29 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"github.com/snowmerak/fiber-blazor/blazor"
+)
 
 templ Calculator() {
-	<div style="margin: 20px; font-family: sans-serif;">
-		<h1>Simple Addition Calculator</h1>
-		<div id="calculator-form">
-			<input type="number" name="a" placeholder="Number 1" style="padding: 5px;"/>
-			+
-			<input type="number" name="b" placeholder="Number 2" style="padding: 5px;"/>
+	{{ b := blazor.NewBinding("calc") }}
+	{{ a := b.Field("a") }}
+	{{ b_field := b.Field("b") }}
+	{{ result := b.ID("result") }}
+	<div class="m-5 font-sans">
+		<h1 class="text-2xl font-bold mb-4">Simple Addition Calculator</h1>
+		<div id="calculator-form" class="flex items-center gap-2">
+			<input { a.Attrs()... } type="number" placeholder="Number 1" class="border p-2 rounded"/>
+			<span>+</span>
+			<input { b_field.Attrs()... } type="number" placeholder="Number 2" class="border p-2 rounded"/>
 			<button 
-				hx-post="/calculate" 
-				hx-target="#result" 
-				hx-include="[name='a'], [name='b']"
-				style="padding: 5px 10px; cursor: pointer;"
+				{ blazor.HX().Post("/calculate").Target(result.Selector()).Include(a.Selector(), b_field.Selector()).Build()... }
+				class="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 transition-colors"
 			>
 				Calculate
 			</button>
 		</div>
-		<div id="result" style="margin-top: 20px; font-size: 1.2em; font-weight: bold;">
+		<div { result.Attrs()... } class="mt-5 text-lg font-bold">
 			Result: 0
 		</div>
 	</div>
