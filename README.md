@@ -20,7 +20,7 @@ Fiber-Blazor is a web development framework for Go that brings the component-bas
 
 ### Prerequisites
 
-- **Go 1.23+**
+- **Go 1.25+**
 
 ### Installation
 
@@ -28,13 +28,13 @@ Fiber-Blazor is a web development framework for Go that brings the component-bas
 git clone https://github.com/snowmerak/fiber-blazor.git
 cd fiber-blazor
 go mod tidy
-go install
+go install ./cmd/flazor/.
 ```
 
 or
 
 ```bash
-go install github.com/snowmerak/fiber-blazor@latest
+go install github.com/snowmerak/fiber-blazor/cmd/flazor@latest
 ```
 
 ## Workflow
@@ -58,10 +58,10 @@ go run main.go
 ```
 
 ### 3. Create your Component (.templ)
-Use the generated `NewBindingOf[Struct]()` helper to automatically manage IDs and Names.
+Use the generated `GetBindingOf[Struct]()` helper to automatically manage IDs and Names.
 
 ```templ
-{% binder := NewBindingOfCalcRequest() %}
+{% binder := GetBindingOfCalcRequest() %}
 <form hx-post="/calculate" hx-target="#result">
     <input type="number" name={ binder.A.Name() } id={ binder.A.ID() } />
     <input type="number" name={ binder.B.Name() } id={ binder.B.ID() } />

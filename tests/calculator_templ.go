@@ -34,7 +34,7 @@ func Calculator(data CalcData) templ.Component {
 			templ_7745c5c3_Var1 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		binder := NewBindingOfCalcRequest()
+		binder := GetBindingOfCalcRequest()
 		result := binder.ID("result")
 		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 1, "<div class=\"p-6 max-w-sm mx-auto bg-white rounded-xl shadow-md space-y-4 border border-gray-200\" id=\"")
 		if templ_7745c5c3_Err != nil {

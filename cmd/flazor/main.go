@@ -215,7 +215,7 @@ func writeGenFile(srcPath, pkgName string, types []string, fields map[string][]f
 		}
 		fmt.Fprintf(f, "}\n\n")
 
-		fmt.Fprintf(f, "func New%s() %s {\n", binderName, binderName)
+		fmt.Fprintf(f, "func Get%s() %s {\n", binderName, binderName)
 		fmt.Fprintf(f, "\tb := blazor.NewBinding()\n")
 		fmt.Fprintf(f, "\treturn %s{\n", binderName)
 		fmt.Fprintf(f, "\t\tBinding: b,\n")

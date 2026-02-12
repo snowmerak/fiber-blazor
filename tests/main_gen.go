@@ -4,13 +4,13 @@ package main
 import "github.com/snowmerak/fiber-blazor/blazor"
 
 type BindedCalcRequest struct {
-	A int `form:"calc_a_82d35084"`
-	B int `form:"calc_b_82d35084"`
+	A int `form:"calc_a_d285a7e2"`
+	B int `form:"calc_b_d285a7e2"`
 }
 
 const (
-	bind_CalcRequest_A = "calc_a_82d35084"
-	bind_CalcRequest_B = "calc_b_82d35084"
+	bind_CalcRequest_A = "calc_a_d285a7e2"
+	bind_CalcRequest_B = "calc_b_d285a7e2"
 )
 
 type BindingOfCalcRequest struct {
@@ -19,7 +19,7 @@ type BindingOfCalcRequest struct {
 	B blazor.Field
 }
 
-func NewBindingOfCalcRequest() BindingOfCalcRequest {
+func GetBindingOfCalcRequest() BindingOfCalcRequest {
 	b := blazor.NewBinding()
 	return BindingOfCalcRequest{
 		Binding: b,
