@@ -12,7 +12,7 @@ Fiber-Blazor is a web development framework for Go that brings the component-bas
 
 ## Project Structure
 
-- `main.go`: The unified build tool. It performs code generation for binders and executes `templ generate`.
+- `cmd/flazor/main.go`: The unified build tool. It performs code generation for binders and executes `templ generate`.
 - `blazor/`: Core library providing the binding system, HTMX attribute builders, and generic renderers.
 - `tests/`: A comprehensive example application (Calculator) demonstrating the end-to-end workflow.
 
@@ -54,17 +54,17 @@ type CalcRequest struct {
 Run the generator from the root directory. It will scan your project, create `_gen.go` files with randomized tags, and generate Templ code.
 
 ```bash
-go run main.go
+flazor
 ```
 
 ### 3. Create your Component (.templ)
 Use the generated `GetBindingOf[Struct]()` helper to automatically manage IDs and Names.
 
 ```templ
-{% binder := GetBindingOfCalcRequest() %}
+{{ binder := GetBindingOfCalcRequest() }}
 <form hx-post="/calculate" hx-target="#result">
-    <input type="number" name={ binder.A.Name() } id={ binder.A.ID() } />
-    <input type="number" name={ binder.B.Name() } id={ binder.B.ID() } />
+    <input type="number" { binder.A.Attrs()... } />
+    <input type="number" { binder.B.Attrs()... } />
     <button type="submit">Calculate</button>
 </form>
 <div id="result"></div>
@@ -88,7 +88,7 @@ app.Post("/calculate", blazor.SetRenderer(
 
 ```bash
 # 1. Generate binders and templates
-go run main.go
+flazor
 
 # 2. Run the test server
 go run ./tests
