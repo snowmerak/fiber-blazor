@@ -4,6 +4,7 @@ import (
 	"github.com/a-h/templ"
 	"github.com/gofiber/fiber/v3"
 	"github.com/gofiber/fiber/v3/middleware/static"
+	"github.com/snowmerak/fiber-blazor/statics"
 )
 
 const defaultTitle = "Fiber Blazor App"
@@ -22,8 +23,10 @@ func InitRender(root templ.Component, lang string, title string) fiber.Handler {
 	}
 }
 
-func Static(app *fiber.App, prefix, rootDir string) {
-	app.Use(prefix, static.New(rootDir))
+func Static(app *fiber.App, prefix string) {
+	app.Use(prefix, static.New("", static.Config{
+		FS: statics.FS,
+	}))
 }
 
 func SetRenderer[T, V any](componentFunc func(data *V) templ.Component, transform func(req *T) (*V, error)) fiber.Handler {

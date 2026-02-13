@@ -21,7 +21,7 @@ type CalcData struct {
 func main() {
 	app := fiber.New()
 
-	blazor.Static(app, "/statics", "./statics")
+	blazor.Static(app, "/statics")
 
 	app.Get("/", blazor.InitRender(Calculator(CalcData{}), "en", "Fiber Blazor Calculator"))
 

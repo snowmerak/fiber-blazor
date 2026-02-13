@@ -112,7 +112,7 @@ func generateSkill(root string) error {
 	sb.WriteString("## Fiber v3 Integration\n\n")
 	sb.WriteString("This framework is built on top of **Fiber v3**. Use the following utilities for seamless integration:\n\n")
 	sb.WriteString("- **`blazor.InitRender(component, lang, title)`**: Initializes the root layout. It returns a `fiber.Handler` that renders the initial page.\n")
-	sb.WriteString("- **`blazor.Static(app, prefix, rootDir)`**: Configures static file serving (e.g., for `htmx.js` and `tailwindcss.js`).\n")
+	sb.WriteString("- **`blazor.Static(app, prefix)`**: Configures static file serving for embedded files (e.g., `htmx.js`, `tailwindcss.js`).\n")
 	sb.WriteString("- **`blazor.SetRenderer(componentFunc, transformFunc)`**: Handles HTMX requests. \n")
 	sb.WriteString("  - `transformFunc` takes the randomized request struct (`Binded[StructName]`) and converts it to data.\n")
 	sb.WriteString("  - `componentFunc` renders the data into a Templ component.\n\n")
@@ -122,7 +122,7 @@ func generateSkill(root string) error {
 	sb.WriteString("2. **Generate code**: Run `flazor` to sync everything.\n")
 	sb.WriteString("3. **Create a template**: Use the binder in your `.templ` file to bind inputs.\n")
 	sb.WriteString("4. **Handle requests**: Use `blazor.SetRenderer` in your Fiber app to process the form data.\n")
-	sb.WriteString("5. **Serve Static Files**: Use `blazor.Static(app, \"/statics\", \"./statics\")` in your `main.go`.\n")
+	sb.WriteString("5. **Serve Static Files**: Use `blazor.Static(app, \"/statics\")` in your `main.go` to serve embedded files.\n")
 
 	err = os.WriteFile(skillPath, []byte(sb.String()), 0644)
 	if err != nil {
