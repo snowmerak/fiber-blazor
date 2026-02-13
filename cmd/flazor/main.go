@@ -111,13 +111,23 @@ func generateSkill(root string) error {
 	sb.WriteString("## Key Concepts\n\n")
 	sb.WriteString("- **Form Binding**: Look for `//blazor:bind` on structs. These generate randomized tags for security and isolation.\n")
 	sb.WriteString("- **Templ Components**: Use `GetBindingOf[StructName]()` to get a binder that helps generate IDs and Names for HTML elements.\n")
-	sb.WriteString("- **HTMX Attributes**: Use `blazor.Post()`, `blazor.Target()`, etc., to build htmx attributes in Go/Templ.\n\n")
+	sb.WriteString("- **HTMX Attributes**: Use `blazor.Post()`, `blazor.Target()`, etc., to build htmx attributes in Go/Templ.\n")
+	sb.WriteString("- **Utility-First CSS**: **Tailwind CSS** is integrated. You can use Tailwind classes directly in your `.templ` files for styling.\n\n")
+
+	sb.WriteString("## Fiber v3 Integration\n\n")
+	sb.WriteString("This framework is built on top of **Fiber v3**. Use the following utilities for seamless integration:\n\n")
+	sb.WriteString("- **`blazor.InitRender(component, lang, title)`**: Initializes the root layout. It returns a `fiber.Handler` that renders the initial page.\n")
+	sb.WriteString("- **`blazor.Static(app, prefix, rootDir)`**: Configures static file serving (e.g., for `htmx.js` and `tailwindcss.js`).\n")
+	sb.WriteString("- **`blazor.SetRenderer(componentFunc, transformFunc)`**: Handles HTMX requests. \n")
+	sb.WriteString("  - `transformFunc` takes the randomized request struct (`Binded[StructName]`) and converts it to data.\n")
+	sb.WriteString("  - `componentFunc` renders the data into a Templ component.\n\n")
 
 	sb.WriteString("## Common Tasks\n\n")
 	sb.WriteString("1. **Add a new bindable struct**: Add `//blazor:bind` above your struct definition.\n")
 	sb.WriteString("2. **Generate code**: Run `flazor` to sync everything.\n")
 	sb.WriteString("3. **Create a template**: Use the binder in your `.templ` file to bind inputs.\n")
 	sb.WriteString("4. **Handle requests**: Use `blazor.SetRenderer` in your Fiber app to process the form data.\n")
+	sb.WriteString("5. **Serve Static Files**: Use `blazor.Static(app, \"/statics\", \"./statics\")` in your `main.go`.\n")
 
 	err = os.WriteFile(skillPath, []byte(sb.String()), 0644)
 	if err != nil {
