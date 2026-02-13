@@ -78,13 +78,8 @@ func generateSkill(root string) error {
 	skillName = reg.ReplaceAllString(skillName, "-")
 	skillName = strings.Trim(skillName, "-")
 
-	// The spec says skill directory must match the name.
-	skillDir := filepath.Join(root, skillName)
-	// Special case for this project: if blazor/skill exists, use it as a base
-	blazorSkillDir := filepath.Join(root, "blazor", "skill")
-	if _, err := os.Stat(blazorSkillDir); err == nil {
-		skillDir = filepath.Join(blazorSkillDir, skillName)
-	}
+	// Target ./.agent/skills/[skillName] as per user requirement
+	skillDir := filepath.Join(root, ".agent", "skills", skillName)
 
 	if _, err := os.Stat(skillDir); os.IsNotExist(err) {
 		if err := os.MkdirAll(skillDir, 0755); err != nil {
