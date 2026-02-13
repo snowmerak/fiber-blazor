@@ -71,7 +71,7 @@ func Calculator(data CalcData) templ.Component {
 		}
 		templ_7745c5c3_Err = templ.RenderAttributes(ctx, templ_7745c5c3_Buffer, blazor.Post("/calculate").
 			Target(result.Selector()).
-			Include(binder.ID("calculator").Selector()+" input").
+			Include(binder.A.Selector(), binder.B.Selector()).
 			Build())
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err

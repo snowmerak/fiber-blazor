@@ -38,7 +38,12 @@ func run() error {
 		return fmt.Errorf("generate binders: %w", err)
 	}
 
-	// 2. Run templ generate
+	// 2. Generate Agent Skill
+	if err := generateSkill("."); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to generate skill: %v\n", err)
+	}
+
+	// 3. Run templ generate
 	fmt.Println("Running templ generate...")
 	ctx := context.Background()
 	// Pass empty args logic or just run with defaults
@@ -47,6 +52,79 @@ func run() error {
 		return fmt.Errorf("templ generate: %w", err)
 	}
 
+	return nil
+}
+
+func generateSkill(root string) error {
+	modData, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		return nil // Not a go module root
+	}
+	modLines := strings.Split(string(modData), "\n")
+	var modName string
+	for _, line := range modLines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "module ") {
+			modName = strings.TrimPrefix(line, "module ")
+			break
+		}
+	}
+
+	parts := strings.Split(strings.TrimSpace(modName), "/")
+	shortName := parts[len(parts)-1]
+	skillName := strings.ToLower(shortName)
+	// Validate skillName based on spec: Lowercase letters, numbers, and hyphens only.
+	reg := regexp.MustCompile(`[^a-z0-9-]+`)
+	skillName = reg.ReplaceAllString(skillName, "-")
+	skillName = strings.Trim(skillName, "-")
+
+	// The spec says skill directory must match the name.
+	skillDir := filepath.Join(root, skillName)
+	// Special case for this project: if blazor/skill exists, use it as a base
+	blazorSkillDir := filepath.Join(root, "blazor", "skill")
+	if _, err := os.Stat(blazorSkillDir); err == nil {
+		skillDir = filepath.Join(blazorSkillDir, skillName)
+	}
+
+	if _, err := os.Stat(skillDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(skillDir, 0755); err != nil {
+			return err
+		}
+	}
+
+	skillPath := filepath.Join(skillDir, "SKILL.md")
+
+	description := fmt.Sprintf("Agent skill for %s, a web application built with Fiber-Blazor framework.", shortName)
+
+	var sb strings.Builder
+	sb.WriteString("---\n")
+	sb.WriteString(fmt.Sprintf("name: %s\n", skillName))
+	sb.WriteString(fmt.Sprintf("description: %s\n", description))
+	sb.WriteString("metadata:\n")
+	sb.WriteString(fmt.Sprintf("  module: %s\n", modName))
+	sb.WriteString("  framework: fiber-blazor\n")
+	sb.WriteString("---\n\n")
+
+	sb.WriteString(fmt.Sprintf("# %s Skill\n\n", shortName))
+	sb.WriteString("This skill provides information on how to interact with the Fiber-Blazor components in this project.\n\n")
+
+	sb.WriteString("## Key Concepts\n\n")
+	sb.WriteString("- **Form Binding**: Look for `//blazor:bind` on structs. These generate randomized tags for security and isolation.\n")
+	sb.WriteString("- **Templ Components**: Use `GetBindingOf[StructName]()` to get a binder that helps generate IDs and Names for HTML elements.\n")
+	sb.WriteString("- **HTMX Attributes**: Use `blazor.Post()`, `blazor.Target()`, etc., to build htmx attributes in Go/Templ.\n\n")
+
+	sb.WriteString("## Common Tasks\n\n")
+	sb.WriteString("1. **Add a new bindable struct**: Add `//blazor:bind` above your struct definition.\n")
+	sb.WriteString("2. **Generate code**: Run `flazor` to sync everything.\n")
+	sb.WriteString("3. **Create a template**: Use the binder in your `.templ` file to bind inputs.\n")
+	sb.WriteString("4. **Handle requests**: Use `blazor.SetRenderer` in your Fiber app to process the form data.\n")
+
+	err = os.WriteFile(skillPath, []byte(sb.String()), 0644)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Generated Agent Skill at %s\n", skillPath)
 	return nil
 }
 
