@@ -191,13 +191,14 @@ func (c *Client) execute(cmd string, args []string) {
 					return
 				}
 				toggle := strings.ToUpper(args[1])
-				if toggle == "ON" {
+				switch toggle {
+				case "ON":
 					c.tracking = true
 					wr.WriteSimpleString("OK")
-				} else if toggle == "OFF" {
+				case "OFF":
 					c.tracking = false
 					wr.WriteSimpleString("OK")
-				} else {
+				default:
 					wr.WriteError("ERR syntax error")
 				}
 				return
