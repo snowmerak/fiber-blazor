@@ -9,31 +9,92 @@ import (
 var (
 	ErrWrongType = errors.New("WRONGTYPE Operation against a key holding the wrong kind of value")
 	ErrNoSuchKey = errors.New("ERR no such key")
+	ErrTimeout   = errors.New("ERR timeout")
 )
 
 type List struct {
-	mu   sync.RWMutex
-	Data []interface{}
+	mu      sync.RWMutex
+	Data    []interface{}
+	Waiters []chan interface{} // Channels for blocking clients
 }
 
 func NewList() *List {
 	return &List{
-		Data: make([]interface{}, 0),
+		Data:    make([]interface{}, 0),
+		Waiters: make([]chan interface{}, 0),
 	}
 }
 
 func (l *List) rpush(values ...interface{}) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.Data = append(l.Data, values...)
+
+	// If there are waiters, satisfy them first
+	for len(l.Waiters) > 0 && len(values) > 0 {
+		ch := l.Waiters[0]
+		l.Waiters = l.Waiters[1:]
+		val := values[0]
+		values = values[1:]
+
+		// Send non-blocking if possible, or blocking?
+		// Since waiter is waiting on select, it should be ready.
+		// Use strict send.
+		select {
+		case ch <- val:
+		default:
+			// If channel full/closed (timeout?), just drop?
+			// But we removed it from Waiters.
+			// Ideally we assume waiter is active or we handle 'closed' waiters structure.
+			// For simplicity: buffered channel size 1?
+			// If we can't send, it means waiter timed out or gone.
+		}
+	}
+
+	if len(values) > 0 {
+		l.Data = append(l.Data, values...)
+	}
 	return len(l.Data)
 }
 
 func (l *List) lpush(values ...interface{}) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	// Prepend
-	l.Data = append(values, l.Data...)
+
+	// If there are waiters, satisfy them first
+	// Redis BLPOP/BRPOP: If list empty, block.
+	// When RPUSH/LPUSH happens, element serves waiter.
+	// Does direction matter?
+	// BLPOP: pop from head. LPush: push to head.
+	// If I push 'a', 'b'. 'a' is at tailmost of push batch if pushed first?
+	// Redis: LPUSH key a b c -> [c, b, a].
+	// Waiters are served FCFS.
+	// We feed waiters from `values`?
+	// If I LPUSH a b c. List empty. 1 waiter.
+	// Waiter gets 'c'? (Last pushed becomes head).
+	// Actually Redis varies. Assuming we feed waiters with what would have been head.
+	// In `LPush`, `values` are reversed before call in my implementation of `LPush` wrapper?
+	// No, inside `lpush` struct method, I did `append(values, l.Data...)`.
+	// My `LPush` wrapper reversed them: `LPUSH key a b c` -> `values` becomes `[c, b, a]`.
+	// `append([c, b, a], data...)`. `c` is at index 0 (Head).
+	// So `c` is the first element available for `LPop` (Head).
+	// So we should feed `c` to waiter?
+	// Yes. `c` is at `values[0]`.
+
+	for len(l.Waiters) > 0 && len(values) > 0 {
+		ch := l.Waiters[0]
+		l.Waiters = l.Waiters[1:]
+		val := values[0]
+		values = values[1:]
+
+		select {
+		case ch <- val:
+		default:
+		}
+	}
+
+	if len(values) > 0 {
+		l.Data = append(values, l.Data...)
+	}
 	return len(l.Data)
 }
 
@@ -84,8 +145,6 @@ func (l *List) rangeList(start, stop int) []interface{} {
 		return []interface{}{}
 	}
 
-	// Return copy to avoid race on slice underlying array if modified later?
-	// Yes, must copy.
 	result := make([]interface{}, stop-start+1)
 	copy(result, l.Data[start:stop+1])
 	return result
@@ -99,7 +158,6 @@ func (d *DistributedMap) getOrCreateList(key string) (*List, error) {
 		l := NewList()
 		val, loaded := shard.LoadOrStore(key, Item{Value: l, ExpiresAt: 0})
 		if loaded {
-			// Check type if race loaded it
 			item := val.(Item)
 			if lVal, ok := item.Value.(*List); ok {
 				return lVal, nil
@@ -111,7 +169,6 @@ func (d *DistributedMap) getOrCreateList(key string) (*List, error) {
 
 	item := val.(Item)
 	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
-		// Expired, replace
 		l := NewList()
 		shard.Store(key, Item{Value: l, ExpiresAt: 0})
 		return l, nil
@@ -152,14 +209,6 @@ func (d *DistributedMap) LPush(key string, values ...interface{}) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	// Note: Redis LPUSH inserts in reverse order of arguments if multiple?
-	// "LPUSH mylist a b c" -> c, b, a
-	// My internal lpush processes `values` as a block.
-	// append(values, l.Data...) puts values as [a, b, c, old...].
-	// This means 'a' is at index 0.
-	// Redis: LPUSH mylist a b c => list is [c, b, a].
-	// So I should reverse `values` before calling `lpush` if I want strict Redis compatibility.
-	// Let's reverse them here.
 	for i, j := 0, len(values)-1; i < j; i, j = i+1, j-1 {
 		values[i], values[j] = values[j], values[i]
 	}
@@ -184,7 +233,6 @@ func (d *DistributedMap) LPop(key string) (interface{}, error) {
 	}
 	val, ok := l.pop(true)
 	if !ok {
-		// List empty, should we remove key? Redis does remove empty list keys.
 		d.Del(key)
 		return nil, nil
 	}
@@ -211,6 +259,96 @@ func (d *DistributedMap) RPop(key string) (interface{}, error) {
 		d.Del(key)
 	}
 	return val, nil
+}
+
+// Blocking Commands
+
+func (d *DistributedMap) blockPop(key string, timeout time.Duration, left bool) (interface{}, error) {
+	// First try non-blocking pop
+	// We need to loop because we might be woken up but data stolen, or logic needs retry?
+	// But `lpush` hands data directly to us via channel.
+
+	var val interface{}
+	var err error
+
+	if left {
+		val, err = d.LPop(key)
+	} else {
+		val, err = d.RPop(key)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+	if val != nil {
+		return val, nil
+	}
+
+	// List empty or missing. Register waiter.
+	l, err := d.getOrCreateList(key) // Must create if not exists to register waiter?
+	// Redis BLPOP keys... if key not exists, it treats as empty list and blocks.
+	if err != nil {
+		return nil, err
+	}
+
+	ch := make(chan interface{}, 1)
+
+	l.mu.Lock()
+	// Re-check just in case
+	if len(l.Data) > 0 {
+		l.mu.Unlock()
+		if left {
+			return d.LPop(key)
+		} else {
+			return d.RPop(key)
+		}
+	}
+	l.Waiters = append(l.Waiters, ch)
+	l.mu.Unlock()
+
+	// Wait
+	select {
+	case v := <-ch:
+		return v, nil
+	case <-time.After(timeout):
+		// Unregister waiter
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		// Find and remove ch
+		for i, c := range l.Waiters {
+			if c == ch {
+				l.Waiters = append(l.Waiters[:i], l.Waiters[i+1:]...)
+				break
+			}
+		}
+		return nil, ErrTimeout // Or return nil, nil? Redis returns nil on timeout.
+	}
+}
+
+func (d *DistributedMap) BLPop(key string, timeout time.Duration) (interface{}, error) {
+	return d.blockPop(key, timeout, true)
+}
+
+func (d *DistributedMap) BRPop(key string, timeout time.Duration) (interface{}, error) {
+	return d.blockPop(key, timeout, false)
+}
+
+// PushX Variants
+
+func (d *DistributedMap) LPushX(key string, values ...interface{}) (int, error) {
+	exists := d.Exists(key)
+	if !exists {
+		return 0, nil
+	}
+	return d.LPush(key, values...)
+}
+
+func (d *DistributedMap) RPushX(key string, values ...interface{}) (int, error) {
+	exists := d.Exists(key)
+	if !exists {
+		return 0, nil
+	}
+	return d.RPush(key, values...)
 }
 
 func (d *DistributedMap) LLen(key string) (int, error) {
@@ -252,7 +390,7 @@ func (d *DistributedMap) LIndex(key string, index int) (interface{}, error) {
 		index = length + index
 	}
 	if index < 0 || index >= length {
-		return nil, nil // Redis returns nil for out of range
+		return nil, nil
 	}
 
 	return l.Data[index], nil
@@ -308,26 +446,11 @@ func (d *DistributedMap) LTrim(key string, start, stop int) error {
 		stop = length - 1
 	}
 	if start > stop {
-		// Empty list
 		l.Data = make([]interface{}, 0)
-		// Should we delete key? Redis LTRIM does not delete key if empty?
-		// Actually typical Redis behavior is to remove empty keys, but LTRIM result might be an empty list which persists?
-		// Checked: Redis LTRIM that empties the list DOES NOT remove the key immediately?
-		// "IF the result is empty list, the key is removed".
-		// Let's implement key removal if empty.
-		d.Del(key) // This is dangerous inside lock? No, Del locks shard, we locked List.
-		// Wait, `d.Del` locks `shard`. `d.getList` locked `shard` briefly then returned.
-		// `l.mu` is locked. `d.Del` locks `shard`. Safe order?
-		// `getList` locks `shard` but unlocks before returning.
-		// So `l.mu` is held. `d.Del` locks `shard`.
-		// Are there cases where we hold `shard` lock and acquire `l.mu`?
-		// `getOrCreateList` locks `shard` then `l.mu`? No, `NewList` doesn't lock.
-		// We don't seem to lock `l.mu` inside `shard` lock. `shard` lock protects `Item`. `l.mu` protects `List` content.
-		// So `d.Del(key)` is safe here.
+		d.Del(key)
 		return nil
 	}
 
-	// Slice list
 	l.Data = l.Data[start : stop+1]
 	return nil
 }
@@ -345,12 +468,6 @@ func (d *DistributedMap) LRem(key string, count int, value interface{}) (int, er
 	defer l.mu.Unlock()
 
 	removed := 0
-	// To perform LRem with generic value, we need comparison.
-	// `value` is interface{}. strict equality `==`.
-	// count > 0: Remove elements equal to value moving from head to tail.
-	// count < 0: Remove elements equal to value moving from tail to head.
-	// count = 0: Remove all elements equal to value.
-
 	newData := make([]interface{}, 0, len(l.Data))
 
 	if count > 0 {
@@ -363,9 +480,6 @@ func (d *DistributedMap) LRem(key string, count int, value interface{}) (int, er
 		}
 	} else if count < 0 {
 		count = -count
-		// Traverse backwards to mark indices to remove?
-		// Or iterate backwards, build new list backwards?
-		// Let's iterate backwards.
 		temp := make([]interface{}, 0, len(l.Data))
 		for i := len(l.Data) - 1; i >= 0; i-- {
 			v := l.Data[i]
@@ -375,12 +489,10 @@ func (d *DistributedMap) LRem(key string, count int, value interface{}) (int, er
 			}
 			temp = append(temp, v)
 		}
-		// Reverse temp to get newData
 		for i := len(temp) - 1; i >= 0; i-- {
 			newData = append(newData, temp[i])
 		}
 	} else {
-		// count == 0, remove all
 		for _, v := range l.Data {
 			if v != value {
 				newData = append(newData, v)
