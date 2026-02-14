@@ -16,6 +16,21 @@ type DistributedMap struct {
 	shards []*sync.Map
 	mask   uint64
 	seed   maphash.Seed
+	// PubSub
+	pubsub *PubSub
+}
+
+type PubSub struct {
+	mu       sync.RWMutex
+	channels map[string]map[int64]chan string // channel -> clientID -> messageChan
+	nextID   int64
+}
+
+func NewPubSub() *PubSub {
+	return &PubSub{
+		channels: make(map[string]map[int64]chan string),
+		nextID:   1,
+	}
 }
 
 func New(size int) *DistributedMap {
@@ -34,6 +49,7 @@ func New(size int) *DistributedMap {
 		shards: shards,
 		mask:   uint64(size - 1),
 		seed:   maphash.MakeSeed(),
+		pubsub: NewPubSub(),
 	}
 }
 
