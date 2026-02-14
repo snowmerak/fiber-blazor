@@ -1,6 +1,8 @@
 package ledis
 
 import (
+	"math"
+	"reflect"
 	"testing"
 )
 
@@ -106,5 +108,55 @@ func TestZInterStore(t *testing.T) {
 	score, _, _ = db.ZScore("self", "a")
 	if score != 2 {
 		t.Errorf("Expected a:2, got %f", score)
+	}
+}
+
+func TestZRangeByScore(t *testing.T) {
+	db := New(16)
+	key := "zrangebyscore_test"
+
+	// 1:one, 2:two, 3:three, 4:four, 5:five
+	db.ZAdd(key, 1, "one")
+	db.ZAdd(key, 2, "two")
+	db.ZAdd(key, 3, "three")
+	db.ZAdd(key, 4, "four")
+	db.ZAdd(key, 5, "five")
+
+	// 2 <= score <= 4 -> two, three, four
+	res, err := db.ZRangeByScore(key, 2, 4, false, 0, -1)
+	if err != nil {
+		t.Fatalf("ZRangeByScore failed: %v", err)
+	}
+	expected := []interface{}{"two", "three", "four"}
+	if !reflect.DeepEqual(res, expected) {
+		t.Errorf("ZRangeByScore 2 4 wrong. Got %v", res)
+	}
+
+	// -inf <= score <= 2 -> one, two
+	res, err = db.ZRangeByScore(key, math.Inf(-1), 2, false, 0, -1)
+	expected = []interface{}{"one", "two"}
+	if !reflect.DeepEqual(res, expected) {
+		t.Errorf("ZRangeByScore -inf 2 wrong. Got %v", res)
+	}
+
+	// 4 <= score <= +inf -> four, five
+	res, err = db.ZRangeByScore(key, 4, math.Inf(1), false, 0, -1)
+	expected = []interface{}{"four", "five"}
+	if !reflect.DeepEqual(res, expected) {
+		t.Errorf("ZRangeByScore 4 +inf wrong. Got %v", res)
+	}
+
+	// Offset 1, Count 1 with 2 <= score <= 4 -> three
+	res, err = db.ZRangeByScore(key, 2, 4, false, 1, 1)
+	expected = []interface{}{"three"}
+	if !reflect.DeepEqual(res, expected) {
+		t.Errorf("ZRangeByScore offset 1 count 1 wrong. Got %v", res)
+	}
+
+	// Reverse 4 >= score >= 2 -> four, three, two
+	res, err = db.ZRevRangeByScore(key, 4, 2, false, 0, -1)
+	expected = []interface{}{"four", "three", "two"}
+	if !reflect.DeepEqual(res, expected) {
+		t.Errorf("ZRevRangeByScore 4 2 wrong. Got %v", res)
 	}
 }
