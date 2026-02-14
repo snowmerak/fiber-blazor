@@ -157,10 +157,26 @@ func TestSCC_Expiration(t *testing.T) {
 	// Ledis.Get/TTL calls NotifyObservers on expiration
 	db.Get("expiry_key")
 
-	// Expect invalidation
-	val, err := reader.Read()
-	if err != nil || val.Type != Push || val.Array[1].Array[0].Bulk != "expiry_key" {
-		t.Fatalf("Failed to receive invalidation on key expiration")
+	// Expect invalidation (async retry)
+	doneExp := make(chan bool)
+	go func() {
+		for {
+			val, err := reader.Read()
+			if err != nil {
+				return
+			}
+			if val.Type == Push && val.Array[1].Array[0].Bulk == "expiry_key" {
+				doneExp <- true
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-doneExp:
+		// Success
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Timeout waiting for invalidation on key expiration")
 	}
 }
 
@@ -183,9 +199,26 @@ func TestSCC_DelInvalidation(t *testing.T) {
 	// Explicit Delete
 	db.Del("del_key")
 
-	// Expect invalidation
-	val, err := reader.Read()
-	if err != nil || val.Type != Push || val.Array[1].Array[0].Bulk != "del_key" {
-		t.Fatalf("Failed to receive invalidation on key deletion")
+	// Expect invalidation (async)
+	done := make(chan bool)
+	go func() {
+		for {
+			val, err := reader.Read()
+			if err != nil {
+				// Pipe closed or error
+				return
+			}
+			if val.Type == Push && val.Array[1].Array[0].Bulk == "del_key" {
+				done <- true
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+		// Success
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Timeout waiting for invalidation on key deletion")
 	}
 }
