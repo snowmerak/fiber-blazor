@@ -19,8 +19,9 @@ type DistributedMap struct {
 	// PubSub
 	pubsub *PubSub
 	// Observers for SCC
-	observers []Observer
-	mu        sync.RWMutex
+	invalidationTable map[string]map[Observer]struct{}
+	clientKeys        map[Observer]map[string]struct{}
+	mu                sync.RWMutex
 }
 
 type Observer interface {
@@ -30,28 +31,69 @@ type Observer interface {
 func (d *DistributedMap) RegisterObserver(o Observer) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.observers = append(d.observers, o)
+	// No-op for now, or just init clientKeys entry
+	if _, ok := d.clientKeys[o]; !ok {
+		d.clientKeys[o] = make(map[string]struct{})
+	}
 }
 
 func (d *DistributedMap) UnregisterObserver(o Observer) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for i, obs := range d.observers {
-		if obs == o {
-			// Remove by swapping with last element and shrinking
-			d.observers[i] = d.observers[len(d.observers)-1]
-			d.observers = d.observers[:len(d.observers)-1]
-			return
+
+	// 1. Remove from invalidationTable for all keys this client is watching
+	if keys, ok := d.clientKeys[o]; ok {
+		for key := range keys {
+			if observers, ok := d.invalidationTable[key]; ok {
+				delete(observers, o)
+				if len(observers) == 0 {
+					delete(d.invalidationTable, key)
+				}
+			}
 		}
+		delete(d.clientKeys, o)
 	}
 }
 
-func (d *DistributedMap) NotifyObservers(key string) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	for _, o := range d.observers {
-		o.Invalidate(key)
+func (d *DistributedMap) Track(key string, o Observer) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// 1. Add to invalidationTable
+	if _, ok := d.invalidationTable[key]; !ok {
+		d.invalidationTable[key] = make(map[Observer]struct{})
 	}
+	d.invalidationTable[key][o] = struct{}{}
+
+	// 2. Add to clientKeys (for cleanup)
+	if _, ok := d.clientKeys[o]; !ok {
+		d.clientKeys[o] = make(map[string]struct{})
+	}
+	d.clientKeys[o][key] = struct{}{}
+}
+
+func (d *DistributedMap) NotifyObservers(key string) {
+	d.mu.Lock() // Must be Lock, not RLock, because we modify the map (one-shot)
+	defer d.mu.Unlock()
+
+	observers, ok := d.invalidationTable[key]
+	if !ok {
+		return
+	}
+
+	// Notify and remove (One-shot semantics)
+	for o := range observers {
+		o.Invalidate(key)
+		// Clean up reverse index
+		if keys, ok := d.clientKeys[o]; ok {
+			delete(keys, key)
+			// Don't delete empty clientKeys entry here to avoid map thrashing,
+			// or do it if memory is concern.
+		}
+	}
+
+	// Remove from invalidationTable
+	delete(d.invalidationTable, key)
 }
 
 type PubSub struct {
@@ -80,11 +122,12 @@ func New(size int) *DistributedMap {
 	}
 
 	return &DistributedMap{
-		shards:    shards,
-		mask:      uint64(size - 1),
-		seed:      maphash.MakeSeed(),
-		pubsub:    NewPubSub(),
-		observers: make([]Observer, 0),
+		shards:            shards,
+		mask:              uint64(size - 1),
+		seed:              maphash.MakeSeed(),
+		pubsub:            NewPubSub(),
+		invalidationTable: make(map[string]map[Observer]struct{}),
+		clientKeys:        make(map[Observer]map[string]struct{}),
 	}
 }
 

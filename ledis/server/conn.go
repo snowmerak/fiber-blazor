@@ -493,6 +493,9 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		}
 		count := 0
 		for _, key := range args {
+			if c.tracking {
+				c.db.Track(key, c)
+			}
 			if c.db.Exists(key) {
 				count++
 			}
@@ -502,6 +505,9 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		if len(args) != 1 {
 			wr.WriteError("ERR wrong number of arguments for 'ttl' command")
 			return
+		}
+		if c.tracking {
+			c.db.Track(args[0], c)
 		}
 		ttl := c.db.TTL(args[0])
 		wr.WriteInteger(int64(ttl.Seconds()))
@@ -518,6 +524,9 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		if len(args) != 1 {
 			wr.WriteError("ERR wrong number of arguments for 'get' command")
 			return
+		}
+		if c.tracking {
+			c.db.Track(args[0], c)
 		}
 		val, exists := c.db.Get(args[0])
 		if !exists {
@@ -547,7 +556,10 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		}
 		vals := c.db.MGet(args...)
 		wr.WriteArray(len(vals))
-		for _, v := range vals {
+		for i, v := range vals {
+			if c.tracking {
+				c.db.Track(args[i], c)
+			}
 			if v == nil {
 				wr.WriteNull()
 			} else {
@@ -609,6 +621,17 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			wr.WriteError("ERR wrong number of arguments for 'lpop' command")
 			return
 		}
+		// LPOP is a write command, but it returns the value, so does it count as a read?
+		// In Redis, LPOP triggers invalidation for others, but does it register tracking?
+		// Actually, if tracking is ON, any command that returns data keys *could* be tracked,
+		// but typically only "ReadOnly" commands are tracked.
+		// However, in Redis 6+, even write commands returning data might not be tracked.
+		// Wait, LPOP invalidates the key.
+		// If I do LPOP k1, I get v1. Does it mean I'm watching k1?
+		// No, LPOP modifies k1.
+		// Only commands that don't modify the key generally register tracking.
+		// So we skip LPOP/RPOP.
+
 		val, err := c.db.LPop(args[0])
 		if err != nil {
 			wr.WriteNull()
@@ -639,6 +662,9 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			wr.WriteError("ERR wrong number of arguments for 'llen' command")
 			return
 		}
+		if c.tracking {
+			c.db.Track(args[0], c)
+		}
 		l, err := c.db.LLen(args[0])
 		if err != nil {
 			wr.WriteInteger(0)
@@ -649,6 +675,9 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		if len(args) != 3 {
 			wr.WriteError("ERR wrong number of arguments for 'lrange' command")
 			return
+		}
+		if c.tracking {
+			c.db.Track(args[0], c)
 		}
 		start, err1 := strconv.ParseInt(args[1], 10, 64)
 		stop, err2 := strconv.ParseInt(args[2], 10, 64)
@@ -689,6 +718,9 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			wr.WriteError("ERR wrong number of arguments for 'hget' command")
 			return
 		}
+		if c.tracking {
+			c.db.Track(args[0], c)
+		}
 		val, err := c.db.HGet(args[0], args[1])
 		if err != nil {
 			wr.WriteNull()
@@ -717,6 +749,9 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			wr.WriteError("ERR wrong number of arguments for 'hlen' command")
 			return
 		}
+		if c.tracking {
+			c.db.Track(args[0], c)
+		}
 		l, err := c.db.HLen(args[0])
 		if err != nil {
 			wr.WriteInteger(0)
@@ -727,6 +762,9 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		if len(args) != 1 {
 			wr.WriteError("ERR wrong number of arguments for 'hgetall' command")
 			return
+		}
+		if c.tracking {
+			c.db.Track(args[0], c)
 		}
 		kv, err := c.db.HGetAll(args[0])
 		if err != nil {
@@ -771,6 +809,9 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			wr.WriteError("ERR wrong number of arguments for 'smembers' command")
 			return
 		}
+		if c.tracking {
+			c.db.Track(args[0], c)
+		}
 		members, err := c.db.SMembers(args[0])
 		if err != nil {
 			wr.WriteArray(0)
@@ -789,6 +830,9 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			wr.WriteError("ERR wrong number of arguments for 'sismember' command")
 			return
 		}
+		if c.tracking {
+			c.db.Track(args[0], c)
+		}
 		isMember, err := c.db.SIsMember(args[0], args[1])
 		if err != nil {
 			wr.WriteInteger(0)
@@ -799,7 +843,6 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 				wr.WriteInteger(0)
 			}
 		}
-
 	// --- Sorted Set ---
 	case "ZADD":
 		if len(args) < 3 || (len(args)-1)%2 != 0 {
@@ -824,6 +867,9 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		if len(args) != 3 {
 			wr.WriteError("ERR wrong number of arguments for 'zrange' command")
 			return
+		}
+		if c.tracking {
+			c.db.Track(args[0], c)
 		}
 		start, err1 := strconv.ParseInt(args[1], 10, 64)
 		stop, err2 := strconv.ParseInt(args[2], 10, 64)
