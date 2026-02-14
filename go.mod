@@ -3,20 +3,17 @@ module github.com/snowmerak/fiber-blazor
 go 1.25.0
 
 require (
+	github.com/RoaringBitmap/roaring v1.9.4
 	github.com/a-h/templ v0.3.977
 	github.com/gofiber/fiber/v3 v3.0.0
+	github.com/redis/go-redis/v9 v9.17.3
 )
 
 require (
-	github.com/RoaringBitmap/roaring v1.9.4 // indirect
 	github.com/bits-and-blooms/bitset v1.12.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/dgraph-io/ristretto v0.2.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
-	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/mschoch/smat v0.2.0 // indirect
-	github.com/pkg/errors v0.9.1 // indirect
-	github.com/redis/go-redis/v9 v9.17.3 // indirect
 )
 
 require (
