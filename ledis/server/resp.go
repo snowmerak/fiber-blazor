@@ -17,11 +17,12 @@ const (
 )
 
 type Value struct {
-	Type  byte
-	Str   string
-	Num   int64
-	Bulk  string
-	Array []Value
+	Type   byte
+	IsNull bool
+	Str    string
+	Num    int64
+	Bulk   string
+	Array  []Value
 }
 
 type Reader struct {
@@ -96,6 +97,11 @@ func (r *Reader) readArray() (val Value, err error) {
 		return val, err
 	}
 
+	if len == -1 {
+		val.IsNull = true
+		return val, nil
+	}
+
 	val.Array = make([]Value, 0)
 	for i := 0; i < int(len); i++ {
 		v, err := r.Read()
@@ -116,6 +122,7 @@ func (r *Reader) readBulk() (val Value, err error) {
 	}
 
 	if len == -1 { // Null Bulk String
+		val.IsNull = true
 		return val, nil
 	}
 

@@ -23,21 +23,37 @@ type Client struct {
 	conn   net.Conn
 	db     *ledis.DistributedMap
 	writer *Writer
-	mu     sync.Mutex
+	mu     sync.Mutex // Protects writer and basic state
 
 	id       int64
 	tracking bool
+
+	// Transaction State
+	txMu     sync.Mutex
+	watching map[string]bool
+	inTx     bool
+	dirty    bool
+	txQueue  [][]string
 }
 
 func (c *Client) Invalidate(key string) {
-	if !c.tracking {
-		return
+	// 1. Handle WATCH (Synchronous to ensure safety before EXEC)
+	c.txMu.Lock()
+	if c.watching[key] {
+		c.dirty = true
 	}
+	c.txMu.Unlock()
+
+	// 2. Handle Client Tracking (SCC) - Asynchronous to avoid deadlock
+	// We read c.tracking carefully; technically racy if modified concurrently,
+	// but tracking assumes mostly atomic ON/OFF.
+	// For strictness, could protect with mu, but Invalidate is called from DB locks.
+	// We'll proceed optimistically or use atomic load if needed.
+	// Given SCC is "Server-Assisted" and allows some laxity, current async approach is fine.
 
 	go func() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		// Re-check tracking inside lock
 		if !c.tracking {
 			return
 		}
@@ -54,10 +70,11 @@ func (h *Handler) Handle(conn net.Conn) {
 	defer conn.Close()
 
 	client := &Client{
-		conn:   conn,
-		db:     h.db,
-		writer: NewWriter(conn),
-		id:     time.Now().UnixNano(),
+		conn:     conn,
+		db:       h.db,
+		writer:   NewWriter(conn),
+		id:       time.Now().UnixNano(),
+		watching: make(map[string]bool),
 	}
 
 	h.db.RegisterObserver(client)
@@ -116,11 +133,141 @@ func (c *Client) writeError(msg string) {
 }
 
 func (c *Client) execute(cmd string, args []string) {
+	// Handle Transaction Commands first (they are never queued)
+	upperCmd := strings.ToUpper(cmd)
+	switch upperCmd {
+	case "WATCH":
+		c.txMu.Lock()
+		defer c.txMu.Unlock()
+		if c.inTx {
+			c.mu.Lock()
+			c.writer.WriteError("ERR WATCH inside MULTI is not allowed")
+			c.mu.Unlock()
+			return
+		}
+		for _, key := range args {
+			c.watching[key] = true
+		}
+		c.mu.Lock()
+		c.writer.WriteSimpleString("OK")
+		c.mu.Unlock()
+		return
+	case "UNWATCH":
+		c.txMu.Lock()
+		defer c.txMu.Unlock()
+		c.watching = make(map[string]bool)
+		c.dirty = false // Reset dirty state? Standard Redis says UNWATCH flushes watched keys.
+		// Does UNWATCH reset dirty? Yes contextually for the client.
+		c.mu.Lock()
+		c.writer.WriteSimpleString("OK")
+		c.mu.Unlock()
+		return
+	case "MULTI":
+		c.txMu.Lock()
+		defer c.txMu.Unlock()
+		if c.inTx {
+			c.mu.Lock()
+			c.writer.WriteError("ERR MULTI calls can not be nested")
+			c.mu.Unlock()
+			return
+		}
+		c.inTx = true
+		c.txQueue = make([][]string, 0)
+		c.mu.Lock()
+		c.writer.WriteSimpleString("OK")
+		c.mu.Unlock()
+		return
+	case "DISCARD":
+		c.txMu.Lock()
+		defer c.txMu.Unlock()
+		if !c.inTx {
+			c.mu.Lock()
+			c.writer.WriteError("ERR DISCARD without MULTI")
+			c.mu.Unlock()
+			return
+		}
+		c.inTx = false
+		c.txQueue = nil
+		c.watching = make(map[string]bool)
+		c.dirty = false
+		c.mu.Lock()
+		c.writer.WriteSimpleString("OK")
+		c.mu.Unlock()
+		return
+	case "EXEC":
+		c.txMu.Lock()
+		if !c.inTx {
+			c.txMu.Unlock()
+			c.mu.Lock()
+			c.writer.WriteError("ERR EXEC without MULTI")
+			c.mu.Unlock()
+			return
+		}
+		if c.dirty {
+			c.txMu.Unlock()
+			// Transaction failed
+			c.txMu.Lock() // Re-acquire to clear state
+			c.inTx = false
+			c.txQueue = nil
+			c.watching = make(map[string]bool)
+			c.dirty = false
+			c.txMu.Unlock()
+
+			c.mu.Lock()
+			c.writer.WriteNull() // Null array/bulk for failure
+			c.mu.Unlock()
+			return
+		}
+
+		// Execute Queue
+		queue := c.txQueue
+		c.inTx = false
+		c.txQueue = nil
+		c.watching = make(map[string]bool)
+		c.dirty = false
+		c.txMu.Unlock()
+
+		c.mu.Lock()
+		c.writer.WriteArray(len(queue))
+		c.mu.Unlock()
+
+		for _, q := range queue {
+			// Recursive execute?
+			// execute locks c.mu. We unlocked it properly.
+			// But execute might try to write to writer directly.
+			// We need execute to run without locking c.mu if we are holding it?
+			// But we are NOT holding it here.
+			// execute acquires c.mu.
+			// However, responses inside EXEC should be Bulk Strings or Integers etc inside the Array.
+			// Standard execute writes to connection directly.
+			// This breaks the protocol (we need to buffer responses or rely on client reading Array then elements).
+			// Redis sends *N \r\n [Response 1] [Response 2]...
+			// So calling execute() sequentially works perfectly!
+			// Each execute call will write its response to the stream.
+			// Since we wrote *N header, logic aligns.
+			c.execute(q[0], q[1:])
+		}
+		return
+	}
+
+	// Queue if inside Transaction
+	c.txMu.Lock()
+	if c.inTx {
+		c.txQueue = append(c.txQueue, append([]string{cmd}, args...))
+		c.txMu.Unlock()
+		c.mu.Lock()
+		c.writer.WriteSimpleString("QUEUED")
+		c.mu.Unlock()
+		return
+	}
+	c.txMu.Unlock()
+
+	// Normal Execution
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	wr := c.writer
 
-	switch strings.ToUpper(cmd) {
+	switch upperCmd {
 	case "HELLO":
 		// Expecting "HELLO 3"
 		ver := "3"
