@@ -219,6 +219,8 @@ func (d *DistributedMap) getOrCreateZSet(key string) (*ZSet, error) {
 			if zVal, ok := item.Value.(*ZSet); ok {
 				return zVal, nil
 			}
+			// If it's a Set, we can't convert it in-place easily without locking.
+			// Redis logic: Type mistmatch error.
 			return nil, ErrWrongType
 		}
 		return z, nil
@@ -262,7 +264,6 @@ func (d *DistributedMap) ZAdd(key string, score float64, member string) (int, er
 }
 
 func (d *DistributedMap) ZRem(key string, members ...string) (int, error) {
-	// Need getSet
 	shard := d.getShard(key)
 	val, ok := shard.Load(key)
 	if !ok {
@@ -361,11 +362,6 @@ func (d *DistributedMap) ZIncrBy(key string, increment float64, member string) (
 	return score, nil
 }
 
-type ZRangeResult struct {
-	Member string
-	Score  float64
-}
-
 func (d *DistributedMap) ZRange(key string, start, stop int64, withScores bool) ([]interface{}, error) {
 	return d.zrangeGeneric(key, start, stop, withScores, false)
 }
@@ -411,16 +407,10 @@ func (d *DistributedMap) zrangeGeneric(key string, start, stop int64, withScores
 	}
 
 	rangeLen := stop - start + 1
-	result := make([]interface{}, 0, rangeLen) // If withScores, doubling happens in fetch? No, interface slice.
+	result := make([]interface{}, 0, rangeLen)
 
-	// Traverse
 	var x *zskiplistNode
 	if reverse {
-		// Start from tail? Or find by rank?
-		// We don't have GetNodeByRank. We must implement it or traverse.
-		// Implementing GetNodeByRank (O(logN)) is better than traversing O(N).
-		// But for now, let's implement naive traversal for simplicity or full implementation.
-		// Wait, start rank is known.
 		x = z.zsl.getNodeByRank(uint64(length - start))
 	} else {
 		x = z.zsl.getNodeByRank(uint64(start + 1))
@@ -431,7 +421,7 @@ func (d *DistributedMap) zrangeGeneric(key string, start, stop int64, withScores
 			break
 		}
 		if withScores {
-			result = append(result, x.member, x.score) // Redis returns flat list
+			result = append(result, x.member, x.score)
 		} else {
 			result = append(result, x.member)
 		}
@@ -442,6 +432,183 @@ func (d *DistributedMap) zrangeGeneric(key string, start, stop int64, withScores
 		}
 	}
 	return result, nil
+}
+
+// ZRank/ZRevRank
+
+func (d *DistributedMap) ZRank(key string, member string) (int64, error) {
+	shard := d.getShard(key)
+	val, ok := shard.Load(key)
+	if !ok {
+		return -1, nil // Not found or Redis returns nil (represented as -1 here for simplicity? No, Redis returns nil/bulk)
+		// Go interface: return -1 to indicate nil? Or error?
+		// Typically -1.
+	}
+	item := val.(Item)
+	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
+		d.Del(key)
+		return -1, nil
+	}
+	z, ok := item.Value.(*ZSet)
+	if !ok {
+		return -1, ErrWrongType
+	}
+
+	z.mu.RLock()
+	defer z.mu.RUnlock()
+
+	score, exists := z.dict[member]
+	if !exists {
+		return -1, nil
+	}
+
+	rank := z.zsl.getRank(score, member)
+	return rank - 1, nil // 0-based
+}
+
+func (d *DistributedMap) ZRevRank(key string, member string) (int64, error) {
+	shard := d.getShard(key)
+	val, ok := shard.Load(key)
+	if !ok {
+		return -1, nil
+	}
+	item := val.(Item)
+	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
+		d.Del(key)
+		return -1, nil
+	}
+	z, ok := item.Value.(*ZSet)
+	if !ok {
+		return -1, ErrWrongType
+	}
+
+	z.mu.RLock()
+	defer z.mu.RUnlock()
+
+	score, exists := z.dict[member]
+	if !exists {
+		return -1, nil
+	}
+
+	rank := z.zsl.getRank(score, member)
+	return z.zsl.length - rank, nil // 0-based reverse
+}
+
+// ZInterStore
+
+func (d *DistributedMap) ZInterStore(destination string, keys ...string) (int64, error) {
+	if len(keys) == 0 {
+		return 0, nil
+	}
+
+	// Collect maps of member->score
+	// We need to support both ZSet and Set.
+
+	type scoredMember struct {
+		score float64
+	}
+
+	// Data structure to hold intersection candidates
+	// Map[member] -> accumulatedScore
+	// But intersection requires presence in ALL.
+	// Best approach:
+	// 1. Identify smallest set to iterate.
+	// 2. Iterate it, check existence in others.
+	// 3. If exists in all, sum scores.
+
+	// We first fetch all sets/zsets to lock them or copy them (snapshot).
+	// For simplicity, we process one by one, but that's not atomic.
+	// We'll snapshot them logic.
+
+	maps := make([]map[string]float64, len(keys))
+
+	for i, key := range keys {
+		shard := d.getShard(key)
+		val, ok := shard.Load(key)
+		if !ok {
+			// One key missing = intersection empty
+			d.Del(destination)
+			return 0, nil
+		}
+		item := val.(Item)
+		if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
+			d.Del(key)
+			d.Del(destination)
+			return 0, nil
+		}
+
+		m := make(map[string]float64)
+
+		switch v := item.Value.(type) {
+		case *ZSet:
+			v.mu.RLock()
+			for member, score := range v.dict {
+				m[member] = score
+			}
+			v.mu.RUnlock()
+		case *Set:
+			v.mu.RLock()
+			for member := range v.Data {
+				// Convert to string?
+				strMember, ok := member.(string)
+				if ok {
+					m[strMember] = 1.0 // Default score 1
+				}
+			}
+			v.mu.RUnlock()
+		default:
+			return 0, ErrWrongType
+		}
+		maps[i] = m
+	}
+
+	// Find smallest
+	base := maps[0]
+	for i := 1; i < len(maps); i++ {
+		if len(maps[i]) < len(base) {
+			base = maps[i]
+		}
+	}
+
+	result := make(map[string]float64)
+
+	for member := range base {
+		sum := 0.0
+		presentInAll := true
+
+		for _, m := range maps {
+			s, ok := m[member]
+			if !ok {
+				presentInAll = false
+				break
+			}
+			sum += s // SUM aggregation default
+		}
+
+		if presentInAll {
+			result[member] = sum
+		}
+	}
+
+	if len(result) == 0 {
+		d.Del(destination)
+		return 0, nil
+	}
+
+	// Store to destination
+	// We can reuse ZAdd logic or direct create.
+	// Direct create is cleaner.
+
+	z := NewZSet()
+	for m, s := range result {
+		z.dict[m] = s
+		z.zsl.insert(s, m)
+	}
+
+	shard := d.getShard(destination)
+	shard.Store(destination, Item{Value: z, ExpiresAt: 0})
+
+	return int64(len(result)), nil
 }
 
 func (zsl *zskiplist) getNodeByRank(rank uint64) *zskiplistNode {
