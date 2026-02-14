@@ -18,6 +18,40 @@ type DistributedMap struct {
 	seed   maphash.Seed
 	// PubSub
 	pubsub *PubSub
+	// Observers for SCC
+	observers []Observer
+	mu        sync.RWMutex
+}
+
+type Observer interface {
+	Invalidate(key string)
+}
+
+func (d *DistributedMap) RegisterObserver(o Observer) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.observers = append(d.observers, o)
+}
+
+func (d *DistributedMap) UnregisterObserver(o Observer) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for i, obs := range d.observers {
+		if obs == o {
+			// Remove by swapping with last element and shrinking
+			d.observers[i] = d.observers[len(d.observers)-1]
+			d.observers = d.observers[:len(d.observers)-1]
+			return
+		}
+	}
+}
+
+func (d *DistributedMap) NotifyObservers(key string) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, o := range d.observers {
+		o.Invalidate(key)
+	}
 }
 
 type PubSub struct {
@@ -46,10 +80,11 @@ func New(size int) *DistributedMap {
 	}
 
 	return &DistributedMap{
-		shards: shards,
-		mask:   uint64(size - 1),
-		seed:   maphash.MakeSeed(),
-		pubsub: NewPubSub(),
+		shards:    shards,
+		mask:      uint64(size - 1),
+		seed:      maphash.MakeSeed(),
+		pubsub:    NewPubSub(),
+		observers: make([]Observer, 0),
 	}
 }
 
@@ -75,6 +110,7 @@ func (d *DistributedMap) Set(key string, value interface{}, duration time.Durati
 		Value:     value,
 		ExpiresAt: expiresAt,
 	})
+	d.NotifyObservers(key)
 }
 
 func (d *DistributedMap) Get(key string) (interface{}, bool) {
@@ -87,6 +123,7 @@ func (d *DistributedMap) Get(key string) (interface{}, bool) {
 	item := val.(Item)
 	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
 		shard.Delete(key)
+		d.NotifyObservers(key) // Notify on expiration
 		return nil, false
 	}
 
@@ -96,6 +133,7 @@ func (d *DistributedMap) Get(key string) (interface{}, bool) {
 func (d *DistributedMap) Del(key string) {
 	shard := d.getShard(key)
 	shard.Delete(key)
+	d.NotifyObservers(key)
 }
 
 func (d *DistributedMap) Exists(key string) bool {
@@ -108,6 +146,7 @@ func (d *DistributedMap) Exists(key string) bool {
 	item := val.(Item)
 	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
 		shard.Delete(key)
+		d.NotifyObservers(key)
 		return false
 	}
 
@@ -129,7 +168,8 @@ func (d *DistributedMap) TTL(key string) time.Duration {
 	ttl := time.Duration(item.ExpiresAt - time.Now().UnixNano())
 	if ttl < 0 {
 		shard.Delete(key)
-		return -2 // Key expired (and thus does not exist)
+		d.NotifyObservers(key) // Notify on expiration
+		return -2              // Key expired (and thus does not exist)
 	}
 
 	return ttl

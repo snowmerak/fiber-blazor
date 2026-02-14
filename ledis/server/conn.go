@@ -2,10 +2,11 @@ package server
 
 import (
 	"fmt"
-	"io"
 	"net"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/snowmerak/fiber-blazor/ledis"
 )
@@ -18,42 +19,67 @@ func NewHandler(db *ledis.DistributedMap) *Handler {
 	return &Handler{db: db}
 }
 
+type Client struct {
+	conn   net.Conn
+	db     *ledis.DistributedMap
+	writer *Writer
+	mu     sync.Mutex
+
+	id       int64
+	tracking bool
+}
+
+func (c *Client) Invalidate(key string) {
+	if !c.tracking {
+		return
+	}
+
+	go func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		// Re-check tracking inside lock
+		if !c.tracking {
+			return
+		}
+
+		// RESP3 Push: >2 \r\n $10 \r\n invalidate \r\n *1 \r\n $keylen \r\n key
+		c.writer.WritePush(2)
+		c.writer.WriteBulkString("invalidate")
+		c.writer.WriteArray(1)
+		c.writer.WriteBulkString(key)
+	}()
+}
+
 func (h *Handler) Handle(conn net.Conn) {
 	defer conn.Close()
 
-	reader := NewReader(conn)
-	// Writer needed? Standard io.Writer is enough for helpers.
-	// But we can wrap it.
-	// writer := NewWriter(conn)
-	// Wait, my Writer struct in resp.go has helpers that take receiver.
-	// So I should use it.
+	client := &Client{
+		conn:   conn,
+		db:     h.db,
+		writer: NewWriter(conn),
+		id:     time.Now().UnixNano(),
+	}
 
-	// Issue: resp.go Writer struct wasn't exported or completely defined in previous step?
-	// I defined `type Writer struct`.
-	// Let's assume it's there.
+	h.db.RegisterObserver(client)
+	defer h.db.UnregisterObserver(client)
+
+	reader := NewReader(conn)
 
 	for {
 		val, err := reader.Read()
 		if err != nil {
-			if err != io.EOF {
-				// Log error?
-				fmt.Println("Read error:", err)
-			}
 			return
 		}
 
-		// Expect Array of Bulk Strings
 		if val.Type != Array {
-			// Write error
-			h.writeError(conn, "ERR request must be Array of Bulk Strings")
+			client.writeError("ERR request must be Array of Bulk Strings")
 			continue
 		}
 
 		if len(val.Array) == 0 {
-			continue // Empty command?
+			continue
 		}
 
-		// Parse Command Name
 		cmdName := ""
 		switch val.Array[0].Type {
 		case BulkString:
@@ -61,7 +87,7 @@ func (h *Handler) Handle(conn net.Conn) {
 		case SimpleString:
 			cmdName = val.Array[0].Str
 		default:
-			h.writeError(conn, "ERR Invalid command format")
+			client.writeError("ERR Invalid command format")
 			continue
 		}
 
@@ -75,22 +101,110 @@ func (h *Handler) Handle(conn net.Conn) {
 			case Integer:
 				args = append(args, fmt.Sprintf("%d", val.Array[i].Num))
 			default:
-				args = append(args, "") // Handle others?
+				args = append(args, "")
 			}
 		}
 
-		h.execute(conn, cmdName, args)
+		client.execute(cmdName, args)
 	}
 }
 
-func (h *Handler) writeError(w io.Writer, msg string) {
-	w.Write([]byte(fmt.Sprintf("-%s\r\n", msg)))
+func (c *Client) writeError(msg string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writer.WriteError(msg)
 }
 
-func (h *Handler) execute(w io.Writer, cmd string, args []string) {
-	wr := NewWriter(w)
+func (c *Client) execute(cmd string, args []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	wr := c.writer
 
 	switch strings.ToUpper(cmd) {
+	case "HELLO":
+		// Expecting "HELLO 3"
+		ver := "3"
+		if len(args) > 0 {
+			ver = args[0]
+		}
+		if ver == "3" {
+			wr.WriteMap(7)
+			wr.WriteBulkString("server")
+			wr.WriteBulkString("redis")
+			wr.WriteBulkString("version")
+			wr.WriteBulkString("7.2.4")
+			wr.WriteBulkString("proto")
+			wr.WriteInteger(3)
+			wr.WriteBulkString("id")
+			wr.WriteInteger(4) // Use a fixed small ID for handshake
+			wr.WriteBulkString("mode")
+			wr.WriteBulkString("standalone")
+			wr.WriteBulkString("role")
+			wr.WriteBulkString("master")
+			wr.WriteBulkString("modules")
+			wr.WriteArray(0)
+		} else {
+			wr.WriteArray(14)
+			wr.WriteBulkString("server")
+			wr.WriteBulkString("redis")
+			wr.WriteBulkString("version")
+			wr.WriteBulkString("7.2.4")
+			wr.WriteBulkString("proto")
+			wr.WriteInteger(2)
+			wr.WriteBulkString("id")
+			wr.WriteInteger(4)
+			wr.WriteBulkString("mode")
+			wr.WriteBulkString("standalone")
+			wr.WriteBulkString("role")
+			wr.WriteBulkString("master")
+			wr.WriteBulkString("modules")
+			wr.WriteArray(0)
+		}
+	case "CLIENT":
+		if len(args) > 0 {
+			sub := strings.ToUpper(args[0])
+			if sub == "ID" {
+				wr.WriteInteger(c.id)
+				return
+			}
+			if sub == "INFO" {
+				info := fmt.Sprintf("id=%d addr=%s name= age=0 idle=0 flags=N db=0 sub=0 psub=0 multi=-1 qbuf=0 qbuf-free=0 obl=0 oll=0 events=r cmd=client", c.id, c.conn.RemoteAddr())
+				wr.WriteBulkString(info)
+				return
+			}
+			if sub == "SETNAME" {
+				if len(args) < 2 {
+					wr.WriteError("ERR syntax error")
+					return
+				}
+				wr.WriteSimpleString("OK")
+				return
+			}
+			if sub == "GETNAME" {
+				wr.WriteNull()
+				return
+			}
+			if sub == "TRACKING" {
+				// CLIENT TRACKING ON/OFF ...
+				if len(args) < 2 {
+					wr.WriteError("ERR syntax error")
+					return
+				}
+				toggle := strings.ToUpper(args[1])
+				if toggle == "ON" {
+					c.tracking = true
+					wr.WriteSimpleString("OK")
+				} else if toggle == "OFF" {
+					c.tracking = false
+					wr.WriteSimpleString("OK")
+				} else {
+					wr.WriteError("ERR syntax error")
+				}
+				return
+			}
+		}
+		wr.WriteError("ERR subcommand not supported")
+
 	// --- Generic ---
 	case "PING":
 		if len(args) > 0 {
@@ -105,8 +219,8 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 		}
 		count := 0
 		for _, key := range args {
-			if h.db.Exists(key) {
-				h.db.Del(key)
+			if c.db.Exists(key) {
+				c.db.Del(key)
 				count++
 			}
 		}
@@ -118,7 +232,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 		}
 		count := 0
 		for _, key := range args {
-			if h.db.Exists(key) {
+			if c.db.Exists(key) {
 				count++
 			}
 		}
@@ -128,7 +242,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'ttl' command")
 			return
 		}
-		ttl := h.db.TTL(args[0])
+		ttl := c.db.TTL(args[0])
 		wr.WriteInteger(int64(ttl.Seconds()))
 
 	// --- String ---
@@ -137,15 +251,14 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'set' command")
 			return
 		}
-		// TODO: Parse EX/PX options
-		h.db.Set(args[0], args[1], 0)
+		c.db.Set(args[0], args[1], 0)
 		wr.WriteSimpleString("OK")
 	case "GET":
 		if len(args) != 1 {
 			wr.WriteError("ERR wrong number of arguments for 'get' command")
 			return
 		}
-		val, exists := h.db.Get(args[0])
+		val, exists := c.db.Get(args[0])
 		if !exists {
 			wr.WriteNull()
 			return
@@ -164,14 +277,14 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 		for i := 0; i < len(args); i += 2 {
 			pairs[args[i]] = args[i+1]
 		}
-		h.db.MSet(pairs)
+		c.db.MSet(pairs)
 		wr.WriteSimpleString("OK")
 	case "MGET":
 		if len(args) == 0 {
 			wr.WriteError("ERR wrong number of arguments for 'mget' command")
 			return
 		}
-		vals := h.db.MGet(args...)
+		vals := c.db.MGet(args...)
 		wr.WriteArray(len(vals))
 		for _, v := range vals {
 			if v == nil {
@@ -189,7 +302,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'incr' command")
 			return
 		}
-		val, err := h.db.Incr(args[0])
+		val, err := c.db.Incr(args[0])
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
@@ -200,7 +313,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'decr' command")
 			return
 		}
-		val, err := h.db.Decr(args[0])
+		val, err := c.db.Decr(args[0])
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
@@ -213,7 +326,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'lpush' command")
 			return
 		}
-		count, err := h.db.LPush(args[0], stringToInterfaceSlice(args[1:])...)
+		count, err := c.db.LPush(args[0], stringToInterfaceSlice(args[1:])...)
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
@@ -224,7 +337,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'rpush' command")
 			return
 		}
-		count, err := h.db.RPush(args[0], stringToInterfaceSlice(args[1:])...)
+		count, err := c.db.RPush(args[0], stringToInterfaceSlice(args[1:])...)
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
@@ -235,9 +348,9 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'lpop' command")
 			return
 		}
-		val, err := h.db.LPop(args[0])
+		val, err := c.db.LPop(args[0])
 		if err != nil {
-			wr.WriteNull() // Assuming error means empty/missing
+			wr.WriteNull()
 		} else {
 			if s, ok := val.(string); ok {
 				wr.WriteBulkString(s)
@@ -250,7 +363,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'rpop' command")
 			return
 		}
-		val, err := h.db.RPop(args[0])
+		val, err := c.db.RPop(args[0])
 		if err != nil {
 			wr.WriteNull()
 		} else {
@@ -265,7 +378,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'llen' command")
 			return
 		}
-		l, err := h.db.LLen(args[0])
+		l, err := c.db.LLen(args[0])
 		if err != nil {
 			wr.WriteInteger(0)
 		} else {
@@ -282,7 +395,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR value is not an integer or out of range")
 			return
 		}
-		vals, err := h.db.LRange(args[0], int(start), int(stop))
+		vals, err := c.db.LRange(args[0], int(start), int(stop))
 		if err != nil {
 			wr.WriteArray(0)
 		} else {
@@ -302,10 +415,9 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'hset' command")
 			return
 		}
-		// HSET key field value [field value ...]
 		count := 0
 		for i := 1; i < len(args); i += 2 {
-			n, err := h.db.HSet(args[0], args[i], args[i+1])
+			n, err := c.db.HSet(args[0], args[i], args[i+1])
 			if err == nil {
 				count += int(n)
 			}
@@ -316,7 +428,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'hget' command")
 			return
 		}
-		val, err := h.db.HGet(args[0], args[1])
+		val, err := c.db.HGet(args[0], args[1])
 		if err != nil {
 			wr.WriteNull()
 		} else {
@@ -333,7 +445,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 		}
 		count := 0
 		for i := 1; i < len(args); i++ {
-			n, err := h.db.HDel(args[0], args[i])
+			n, err := c.db.HDel(args[0], args[i])
 			if err == nil {
 				count += int(n)
 			}
@@ -344,7 +456,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'hlen' command")
 			return
 		}
-		l, err := h.db.HLen(args[0])
+		l, err := c.db.HLen(args[0])
 		if err != nil {
 			wr.WriteInteger(0)
 		} else {
@@ -355,7 +467,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'hgetall' command")
 			return
 		}
-		kv, err := h.db.HGetAll(args[0])
+		kv, err := c.db.HGetAll(args[0])
 		if err != nil {
 			wr.WriteArray(0)
 		} else {
@@ -376,7 +488,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'sadd' command")
 			return
 		}
-		count, err := h.db.SAdd(args[0], stringToInterfaceSlice(args[1:])...)
+		count, err := c.db.SAdd(args[0], stringToInterfaceSlice(args[1:])...)
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
@@ -387,7 +499,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'srem' command")
 			return
 		}
-		count, err := h.db.SRem(args[0], stringToInterfaceSlice(args[1:])...)
+		count, err := c.db.SRem(args[0], stringToInterfaceSlice(args[1:])...)
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
@@ -398,7 +510,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'smembers' command")
 			return
 		}
-		members, err := h.db.SMembers(args[0])
+		members, err := c.db.SMembers(args[0])
 		if err != nil {
 			wr.WriteArray(0)
 		} else {
@@ -416,7 +528,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'sismember' command")
 			return
 		}
-		isMember, err := h.db.SIsMember(args[0], args[1])
+		isMember, err := c.db.SIsMember(args[0], args[1])
 		if err != nil {
 			wr.WriteInteger(0)
 		} else {
@@ -433,9 +545,6 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'zadd' command")
 			return
 		}
-		// ZADD key score member [score member ...]
-		// Ledis ZAdd takes key, score, member.
-		// Loop
 		added := 0
 		for i := 1; i < len(args); i += 2 {
 			score, err := strconv.ParseFloat(args[i], 64)
@@ -444,7 +553,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 				return
 			}
 			member := args[i+1]
-			count, err := h.db.ZAdd(args[0], score, member)
+			count, err := c.db.ZAdd(args[0], score, member)
 			if err == nil {
 				added += count
 			}
@@ -461,8 +570,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR value is not an integer")
 			return
 		}
-		// ZRange(key, start, stop, withScores)
-		res, err := h.db.ZRange(args[0], start, stop, false)
+		res, err := c.db.ZRange(args[0], start, stop, false)
 		if err != nil {
 			wr.WriteArray(0)
 		} else {
@@ -471,7 +579,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 				if s, ok := item.(string); ok {
 					wr.WriteBulkString(s)
 				} else if f, ok := item.(float64); ok {
-					wr.WriteBulkString(fmt.Sprintf("%g", f)) // Use %g for float
+					wr.WriteBulkString(fmt.Sprintf("%g", f))
 				} else {
 					wr.WriteBulkString(fmt.Sprintf("%v", item))
 				}
@@ -490,7 +598,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR bit or offset is not an integer")
 			return
 		}
-		oldVal, err := h.db.SetBit(args[0], offset, int(val))
+		oldVal, err := c.db.SetBit(args[0], offset, int(val))
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
@@ -506,7 +614,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR offset is not an integer")
 			return
 		}
-		val, err := h.db.GetBit(args[0], offset)
+		val, err := c.db.GetBit(args[0], offset)
 		if err != nil {
 			wr.WriteInteger(0)
 		} else {
@@ -514,9 +622,6 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 		}
 	case "BITCOUNT":
 		if len(args) != 1 {
-			// Ignoring start/end arguments for now as our BitCount doesn't support them easily?
-			// Checking ledis_bitmap.go... BitCount(key string) (uint64, error)
-			// So strict 1 arg.
 			if len(args) > 1 {
 				wr.WriteError("ERR syntax error (arguments not supported for bitcount yet)")
 				return
@@ -524,7 +629,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'bitcount' command")
 			return
 		}
-		count, err := h.db.BitCount(args[0])
+		count, err := c.db.BitCount(args[0])
 		if err != nil {
 			wr.WriteInteger(0)
 		} else {
@@ -537,8 +642,7 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'publish' command")
 			return
 		}
-		// Publish returns int64, no error
-		count := h.db.Publish(args[0], args[1])
+		count := c.db.Publish(args[0], args[1])
 		wr.WriteInteger(count)
 
 	// --- Stream ---
@@ -547,12 +651,10 @@ func (h *Handler) execute(w io.Writer, cmd string, args []string) {
 			wr.WriteError("ERR wrong number of arguments for 'xadd' command")
 			return
 		}
-		// XADD key ID field value ...
-		id, err := h.db.XAdd(args[0], args[1], args[2:]...)
+		id, err := c.db.XAdd(args[0], args[1], args[2:]...)
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
-			// Redis XADD returns the ID as bulk string usually.
 			wr.WriteBulkString(id)
 		}
 

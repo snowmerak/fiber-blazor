@@ -13,6 +13,7 @@ const (
 	Integer      = ':'
 	BulkString   = '$'
 	Array        = '*'
+	Push         = '>'
 )
 
 type Value struct {
@@ -67,10 +68,22 @@ func (r *Reader) Read() (val Value, err error) {
 	switch _type {
 	case Array:
 		return r.readArray()
+	case Push:
+		val, err := r.readArray()
+		val.Type = Push // Override type
+		return val, err
 	case BulkString:
 		return r.readBulk()
 	case SimpleString:
 		return r.readSimpleString()
+	case Integer:
+		val.Type = Integer
+		val.Num, _, err = r.ReadInteger()
+		return val, err
+	case Error:
+		val, err = r.readSimpleString() // Reuse simple string read for error message
+		val.Type = Error                // Override type to Error
+		return val, err
 	default:
 		return Value{}, fmt.Errorf("unknown type: %v", string(_type))
 	}
@@ -198,5 +211,15 @@ func (w *Writer) WriteNull() error {
 
 func (w *Writer) WriteArray(len int) error {
 	_, err := w.writer.Write([]byte(fmt.Sprintf("*%d\r\n", len)))
+	return err
+}
+
+func (w *Writer) WritePush(len int) error {
+	_, err := w.writer.Write([]byte(fmt.Sprintf(">%d\r\n", len)))
+	return err
+}
+
+func (w *Writer) WriteMap(len int) error {
+	_, err := w.writer.Write([]byte(fmt.Sprintf("%%%d\r\n", len)))
 	return err
 }
