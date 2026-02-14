@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -122,7 +124,7 @@ func (h *Handler) Handle(conn net.Conn) {
 			}
 		}
 
-		client.execute(cmdName, args)
+		client.execute(cmdName, args, client.writer, &client.mu)
 	}
 }
 
@@ -132,7 +134,13 @@ func (c *Client) writeError(msg string) {
 	c.writer.WriteError(msg)
 }
 
-func (c *Client) execute(cmd string, args []string) {
+func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
+
+	// Use provided writer, or fall back to client writer (should always be provided now)
+	wr := w
+	if wr == nil {
+		wr = c.writer
+	}
 	// Handle Transaction Commands first (they are never queued)
 	upperCmd := strings.ToUpper(cmd)
 	switch upperCmd {
@@ -227,25 +235,116 @@ func (c *Client) execute(cmd string, args []string) {
 		c.dirty = false
 		c.txMu.Unlock()
 
+		// Analyze queue for concurrency
+		// We can group commands by Shard Index.
+		// If a command touches multiple shards (e.g. MSET), or no keys, or unknown keys,
+		// we must treat it as a barrier and execute sequentially (or all parallel groups must finish first).
+		// For simplicity in V1:
+		// If ANY command in the queue is "unsafe" for parallelism, fallback to full sequential.
+		// Unsafe: MSET, MGET, FLUSHDB, KEYS, etc. (Multi-key or global)
+		// Safe: SET, GET, INCR, L* (single key), H* (single key), Z* (single key)
+
+		canParallelize := true
+		// Map from Queue Index -> Shard ID. -1 if unknown/global.
+		cmdShards := make([]int, len(queue))
+
+		for i, q := range queue {
+			cmd := strings.ToUpper(q[0])
+			args := q[1:]
+			key := ""
+
+			// Determine primary key
+			switch cmd {
+			case "SET", "GET", "INCR", "DECR",
+				"LPUSH", "RPUSH", "LPOP", "RPOP", "LLEN", "LRANGE",
+				"HSET", "HGET", "HDEL", "HLEN", "HGETALL",
+				"SADD", "SREM", "SMEMBERS", "SISMEMBER",
+				"ZADD", "ZRANGE",
+				"SETBIT", "GETBIT", "BITCOUNT",
+				"XADD": // Stream
+				if len(args) > 0 {
+					key = args[0]
+				}
+			case "TTL", "EXISTS": // Read-only but single key
+				if len(args) > 0 {
+					key = args[0]
+				}
+			default:
+				// MSET, MGET, DEL (multi-key), PUBLISH (channel is key? yes, but pubsub is global-ish in this impl? no, localized by channel key hash usually. But let's be safe), PING, ECHO
+				// DEL is multi-key in args.
+				canParallelize = false
+			}
+
+			if !canParallelize {
+				break
+			}
+
+			if key != "" {
+				cmdShards[i] = c.db.GetShardIndex(key)
+			} else {
+				// No key? e.g. random command or empty args. Safe to parallelize?
+				// Better safe than sorry.
+				canParallelize = false
+			}
+		}
+
 		c.mu.Lock()
 		c.writer.WriteArray(len(queue))
 		c.mu.Unlock()
 
-		for _, q := range queue {
-			// Recursive execute?
-			// execute locks c.mu. We unlocked it properly.
-			// But execute might try to write to writer directly.
-			// We need execute to run without locking c.mu if we are holding it?
-			// But we are NOT holding it here.
-			// execute acquires c.mu.
-			// However, responses inside EXEC should be Bulk Strings or Integers etc inside the Array.
-			// Standard execute writes to connection directly.
-			// This breaks the protocol (we need to buffer responses or rely on client reading Array then elements).
-			// Redis sends *N \r\n [Response 1] [Response 2]...
-			// So calling execute() sequentially works perfectly!
-			// Each execute call will write its response to the stream.
-			// Since we wrote *N header, logic aligns.
-			c.execute(q[0], q[1:])
+		if !canParallelize {
+			// Sequential Fallback
+			for _, q := range queue {
+				c.execute(q[0], q[1:], c.writer, &c.mu)
+			}
+			return
+		}
+
+		// Parallel Execution
+		// Group by Shard
+		shardCmds := make(map[int][]int)
+		for i, shardID := range cmdShards {
+			shardCmds[shardID] = append(shardCmds[shardID], i)
+		}
+
+		// We'll create a buffer for each command in queue to capture output
+		results := make([]*bytes.Buffer, len(queue))
+		var wg sync.WaitGroup
+
+		for shardID, indices := range shardCmds {
+			// Launch goroutine for this shard
+			wg.Add(1)
+			go func(sid int, idxs []int) {
+				defer wg.Done()
+				for _, idx := range idxs {
+					// Prepare buffer
+					buf := new(bytes.Buffer)
+					results[idx] = buf
+
+					// Execute without client lock, writing to buffer
+					// Note: we pass 'nil' for mutex because we don't want 'execute' to lock c.mu
+					// 'c.execute' handles parsing and calling DB. DB calls handle their own locking.
+					// c.writer is NOT used. We pass a new Writer wrapping our buffer.
+					q := queue[idx]
+
+					bufferedWriter := NewWriter(buf)
+
+					// Lock is NOT held here.
+					c.execute(q[0], q[1:], bufferedWriter, nil)
+				}
+			}(shardID, indices)
+		}
+
+		wg.Wait()
+
+		// Write aggregated results to client sequentially
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		for _, buf := range results {
+			if _, err := io.Copy(c.writer.writer, buf); err != nil {
+				// If writing fails, connection is probably dead
+				return
+			}
 		}
 		return
 	}
@@ -255,17 +354,31 @@ func (c *Client) execute(cmd string, args []string) {
 	if c.inTx {
 		c.txQueue = append(c.txQueue, append([]string{cmd}, args...))
 		c.txMu.Unlock()
-		c.mu.Lock()
-		c.writer.WriteSimpleString("QUEUED")
-		c.mu.Unlock()
+		if mu != nil {
+			mu.Lock()
+		}
+		wr.WriteSimpleString("QUEUED")
+		if mu != nil {
+			mu.Unlock()
+		}
 		return
 	}
 	c.txMu.Unlock()
 
 	// Normal Execution
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	wr := c.writer
+	if mu != nil {
+		mu.Lock()
+		defer mu.Unlock()
+	}
+	// wr is already set to w or c.writer
+	// But wait, the original code had `c.mu.Lock()` here for "Normal Execution".
+	// My signature change `execute(..., mu)` handles this locking logic at the START of the function.
+	// So we don't need another Lock() here, IF we assume the entire function execution is atomic under `mu`.
+	// However, my internal `mu` logic was:
+	// if mu != nil { mu.Lock(); defer mu.Unlock() }
+	// This covers the whole function.
+	// So we don't need explicit locking here.
+	// BUT, `wr` usage below needs to be safe. It is safe if covered by `mu`.
 
 	switch upperCmd {
 	case "HELLO":

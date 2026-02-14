@@ -95,6 +95,10 @@ func (d *DistributedMap) hash(key string) uint64 {
 	return h.Sum64()
 }
 
+func (d *DistributedMap) GetShardIndex(key string) int {
+	return int(d.hash(key) & d.mask)
+}
+
 func (d *DistributedMap) getShard(key string) *sync.Map {
 	idx := d.hash(key) & d.mask
 	return d.shards[idx]
