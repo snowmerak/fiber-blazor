@@ -1,16 +1,15 @@
-package integrations
+package server
 
 import (
 	"context"
 	"testing"
 
 	"github.com/snowmerak/fiber-blazor/ledis"
-	"github.com/snowmerak/fiber-blazor/ledis/server"
 )
 
 func TestGoRedisIntegration(t *testing.T) {
 	db := ledis.New(16)
-	rdb := server.NewGoRedisClient(db)
+	rdb := NewGoRedisClient(db)
 	defer rdb.Close()
 
 	ctx := context.Background()
@@ -42,7 +41,7 @@ func TestGoRedisIntegration(t *testing.T) {
 
 func TestRueidisIntegration(t *testing.T) {
 	db := ledis.New(16)
-	client, err := server.NewRueidisClient(db)
+	client, err := NewRueidisClient(db)
 	if err != nil {
 		t.Fatalf("NewRueidisClient failed: %v", err)
 	}
