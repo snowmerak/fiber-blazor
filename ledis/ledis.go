@@ -1,6 +1,7 @@
 package ledis
 
 import (
+	"context"
 	"fmt" // Added for fmt.Sprintf in Set method
 	"hash/maphash"
 	"math/bits"
@@ -11,6 +12,11 @@ import (
 
 	"github.com/RoaringBitmap/roaring/roaring64"
 	"github.com/panjf2000/ants/v2"
+)
+
+const (
+	evictSampleRate = 20
+	evictThreshold  = 5 // 25% of 20
 )
 
 const (
@@ -118,6 +124,11 @@ type DistributedMap struct {
 	mu                sync.RWMutex
 
 	WorkerPool *ants.Pool
+
+	// Eviction
+	evictCtx    context.Context
+	evictCancel context.CancelFunc
+	wg          sync.WaitGroup
 }
 
 type Observer interface {
@@ -219,7 +230,7 @@ func New(size int) *DistributedMap {
 
 	pool, _ := ants.NewPool(runtime.NumCPU() * 4)
 
-	return &DistributedMap{
+	d := &DistributedMap{
 		shards:            shards,
 		mask:              uint64(size - 1),
 		seed:              maphash.MakeSeed(),
@@ -228,10 +239,12 @@ func New(size int) *DistributedMap {
 		clientKeys:        make(map[Observer]map[string]struct{}),
 		WorkerPool:        pool,
 	}
-}
 
-func (d *DistributedMap) Close() {
-	d.WorkerPool.Release()
+	d.evictCtx, d.evictCancel = context.WithCancel(context.Background())
+	d.wg.Add(1)
+	go d.startEvictLoop()
+
+	return d
 }
 
 func (d *DistributedMap) hash(key string) uint64 {
@@ -239,6 +252,130 @@ func (d *DistributedMap) hash(key string) uint64 {
 	h.SetSeed(d.seed)
 	h.WriteString(key)
 	return h.Sum64()
+}
+
+func (d *DistributedMap) Close() {
+	d.evictCancel()
+	d.wg.Wait()
+	d.WorkerPool.Release()
+}
+
+func (d *DistributedMap) startEvictLoop() {
+	defer d.wg.Done()
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	// Strategy 2 state
+	currentShard := 0
+	lastScanTime := time.Time{} // Zero time means ready to scan if not in rest period
+	scanningActive := true      // Start active
+
+	for {
+		select {
+		case <-d.evictCtx.Done():
+			return
+		case <-ticker.C:
+			// Strategy 1: Probabilistic Sampling on ALL shards (or subset?)
+			// Redis does it on all DBs. We have 1024 shards.
+			// Sampling 20 keys from 1024 shards every second = 20k lookups.
+			// Might be too heavy?
+			// Redis by default is 10 times per second.
+			// If we do 1s interval, maybe we sample a subset of shards?
+			// Or just rely on Strategy 2 mainly and use Strategy 1 on "active" shards?
+			// Let's iterate all shards for Strategy 1 as planned, but maybe limit N?
+			// 20 keys * 1024 shards = 20480 checks/sec.
+			// Map lookup is ~50ns. 20k * 50ns = 1ms.
+			// 1ms CPU time per second is negligible.
+			d.evictSample()
+
+			// Strategy 2: Background Scan
+			if scanningActive {
+				// Scan 1 shard
+				d.evictScanShard(currentShard)
+				currentShard++
+				if currentShard >= len(d.shards) {
+					// Cycle complete
+					currentShard = 0
+					scanningActive = false
+					lastScanTime = time.Now()
+				}
+			} else {
+				// Check if rest period is over
+				if time.Since(lastScanTime) >= 5*time.Minute {
+					scanningActive = true
+				}
+			}
+		}
+	}
+}
+
+func (d *DistributedMap) evictSample() {
+	for _, shard := range d.shards {
+		// sync.Map doesn't have random access or length suitable for random sampling.
+		// range is the only way, but range iterates all.
+		// We can't efficienty sample random keys from sync.Map without keys list.
+		// HACK: We use Range and stop after N items.
+		// This always checks the *same* N items if map structure doesn't change!
+		// Redis uses a hash table where it can pick random bucket.
+		// sync.Map is complex.
+		// If we can't do random, "First N" is bad (biased).
+		// Alternative: We skip distinct amount? No efficient way.
+		//
+		// Given sync.Map limitation, Strategy 1 (Random Sampling) is hard to implement correctly/efficiently.
+		// Strategy 2 (Full Scan) is feasible.
+		//
+		// compromise: We rely heavily on Strategy 2.
+		// Or, since we are doing Strategy 2 (Sequential Scan), maybe that's enough?
+		// User accepted "Hybrid".
+		// To make "Sample" vaguely random in Range:
+		// We can't.
+		//
+		// Wait, if we use just Strategy 2, we cover everything.
+		// Let's implement evictSample as "Scan a few random shards fully"?
+		// No.
+		//
+		// Let's implement Strategy 2 ROBUSTLY and maybe skip Strategy 1 if it's ineffective on sync.Map?
+		// Or, use `Range` but abort after 20 items.
+		// It's better than nothing, effectively "Scanning head".
+		// If keys are inserted/deleted, "head" changes.
+
+		expiredCount := 0
+		checked := 0
+
+		shard.Range(func(key, value any) bool {
+			checked++
+			item := value.(*Item)
+			if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
+				// Use LoadAndDelete to ensure thread safety
+				if _, ok := shard.LoadAndDelete(key); ok {
+					d.NotifyObservers(key.(string))
+					expiredCount++
+				}
+			}
+
+			return checked < evictSampleRate
+		})
+	}
+}
+
+func (d *DistributedMap) evictScanShard(shardIdx int) {
+	if shardIdx < 0 || shardIdx >= len(d.shards) {
+		return
+	}
+	shard := d.shards[shardIdx]
+
+	// Scan ALL items in this shard
+	shard.Range(func(key, value any) bool {
+		item := value.(*Item)
+		if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
+			if _, ok := shard.LoadAndDelete(key); ok {
+				d.NotifyObservers(key.(string))
+			}
+		}
+		// Continue iteration
+		return true
+	})
 }
 
 func (d *DistributedMap) GetShardIndex(key string) int {
