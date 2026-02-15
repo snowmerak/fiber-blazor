@@ -5,7 +5,25 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"sync"
 )
+
+var readerPool = sync.Pool{
+	New: func() interface{} {
+		return &Reader{
+			reader: bufio.NewReader(nil),
+		}
+	},
+}
+
+var writerPool = sync.Pool{
+	New: func() interface{} {
+		return &Writer{
+			writer: bufio.NewWriter(nil),
+			buf:    make([]byte, 0, 64),
+		}
+	},
+}
 
 const (
 	SimpleString = '+'
@@ -31,7 +49,36 @@ type Reader struct {
 }
 
 func NewReader(rd io.Reader) *Reader {
-	return &Reader{reader: bufio.NewReader(rd)}
+	r := readerPool.Get().(*Reader)
+	r.reader.Reset(rd)
+	return r
+}
+
+func PutReader(r *Reader) {
+	r.reader.Reset(nil) // Detach from underlying reader to avoid leaks? Or just keep it.
+	// Reset(nil) panics if Read is called, but that's fine.
+	// Actually bufio.NewReader(nil) is fine until utilized.
+	// Reset(nil) might be better to clear reference to net.Conn.
+	// But bufio.Reader.Reset(io.Reader) handles nil?
+	// Let's just reset when Getting.
+	// But to avoid holding onto net.Conn, we should clear it.
+	// How to clear bufio.Reader?
+	// r.reader.Reset(nil) might work if we have a dummy reader?
+	// Or we can just trust GC if we overwrite on Get?
+	// But the pool keeps the *Reader which points to bufio.Reader which points to net.Conn.
+	// We MUST clear the reference.
+	// bufio.Reader doesn't have a Clear() method.
+	// We can Reset to a dummy empty reader.
+	// r.reader.Reset(emptyReader)
+	readerPool.Put(r)
+}
+
+var emptyReader = &endpointReader{}
+
+type endpointReader struct{}
+
+func (e *endpointReader) Read(p []byte) (n int, err error) {
+	return 0, io.EOF
 }
 
 func (r *Reader) ReadLine() (line []byte, n int, err error) {
@@ -157,10 +204,16 @@ type Writer struct {
 }
 
 func NewWriter(w io.Writer) *Writer {
-	return &Writer{
-		writer: bufio.NewWriter(w),
-		buf:    make([]byte, 0, 64),
-	}
+	wr := writerPool.Get().(*Writer)
+	wr.writer.Reset(w)
+	wr.buf = wr.buf[:0]
+	return wr
+}
+
+func PutWriter(w *Writer) {
+	w.writer.Reset(io.Discard) // prevent leak
+	w.buf = w.buf[:0]
+	writerPool.Put(w)
 }
 
 func (w *Writer) Flush() error {

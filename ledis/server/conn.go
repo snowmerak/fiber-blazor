@@ -79,11 +79,19 @@ func (h *Handler) Handle(conn net.Conn) {
 		id:       time.Now().UnixNano(),
 		watching: make(map[string]bool),
 	}
+	// Note: We don't PutWriter the client.writer explicitly on Close?
+	// We should. But client struct owns it.
+	// Ideally we add a Close() method to Client.
+	// Or handle it in defer.
 
 	h.db.RegisterObserver(client)
 	defer h.db.UnregisterObserver(client)
 
+	// Clean up writer
+	defer PutWriter(client.writer)
+
 	reader := NewReader(conn)
+	defer PutReader(reader)
 
 	for {
 		val, err := reader.Read()
@@ -338,12 +346,13 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 					q := queue[idx]
 
 					// Check if we need to create a new Writer or can reuse?
-					// For now new Writer is cheap.
+					// For now new Writer is cheap (pooled).
 					bufferedWriter := NewWriter(buf)
 
 					// Lock is NOT held here.
 					c.execute(q[0], q[1:], bufferedWriter, nil)
 					bufferedWriter.Flush()
+					PutWriter(bufferedWriter)
 				}
 			})
 		}
