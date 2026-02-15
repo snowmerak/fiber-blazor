@@ -66,7 +66,7 @@ func (i *Item) reset() {
 }
 
 // Helper to convert numeric types to int64
-func toInt64(val interface{}) (int64, error) {
+func toInt64(val any) (int64, error) {
 	switch v := val.(type) {
 	case int:
 		return int64(v), nil
@@ -101,7 +101,7 @@ func toInt64(val interface{}) (int64, error) {
 }
 
 var itemPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		return &Item{}
 	},
 }
@@ -267,7 +267,7 @@ func (d *DistributedMap) getShard(key string) *sync.Map {
 // But for this file, let's update `Set` to handle String only or panic/error?
 // Or type switch.
 
-func (d *DistributedMap) Set(key string, value interface{}, duration time.Duration) {
+func (d *DistributedMap) Set(key string, value any, duration time.Duration) {
 	// Assumes String for generic Set, or type switch
 	// Ideally we refactor usages.
 	// For now, support string only or basic types
@@ -329,7 +329,7 @@ func (d *DistributedMap) Set(key string, value interface{}, duration time.Durati
 	d.NotifyObservers(key)
 }
 
-func (d *DistributedMap) Get(key string) (interface{}, bool) {
+func (d *DistributedMap) Get(key string) (any, bool) {
 	shard := d.getShard(key)
 	val, ok := shard.Load(key)
 	if !ok {

@@ -194,7 +194,7 @@ func (i *Item) pop(left bool) (string, bool) {
 
 // Commands
 
-func (d *DistributedMap) LPush(key string, values ...interface{}) (int, error) {
+func (d *DistributedMap) LPush(key string, values ...any) (int, error) {
 	// Convert values to strings
 	strValues := make([]string, len(values))
 	for i, v := range values {
@@ -214,7 +214,7 @@ func (d *DistributedMap) LPush(key string, values ...interface{}) (int, error) {
 	return item.lpush(strValues...), nil
 }
 
-func (d *DistributedMap) RPush(key string, values ...interface{}) (int, error) {
+func (d *DistributedMap) RPush(key string, values ...any) (int, error) {
 	strValues := make([]string, len(values))
 	for i, v := range values {
 		switch val := v.(type) {
@@ -232,7 +232,7 @@ func (d *DistributedMap) RPush(key string, values ...interface{}) (int, error) {
 	return item.rpush(strValues...), nil
 }
 
-func (d *DistributedMap) LPop(key string) (interface{}, error) {
+func (d *DistributedMap) LPop(key string) (any, error) {
 	item, err := d.getListItem(key)
 	if err != nil {
 		return nil, err
@@ -257,7 +257,7 @@ func (d *DistributedMap) LPop(key string) (interface{}, error) {
 	return val, nil
 }
 
-func (d *DistributedMap) RPop(key string) (interface{}, error) {
+func (d *DistributedMap) RPop(key string) (any, error) {
 	item, err := d.getListItem(key)
 	if err != nil {
 		return nil, err
@@ -280,8 +280,8 @@ func (d *DistributedMap) RPop(key string) (interface{}, error) {
 	return val, nil
 }
 
-func (d *DistributedMap) blockPop(key string, timeout time.Duration, left bool) (interface{}, error) {
-	var val interface{}
+func (d *DistributedMap) blockPop(key string, timeout time.Duration, left bool) (any, error) {
+	var val any
 	var err error
 
 	if left {
@@ -334,17 +334,17 @@ func (d *DistributedMap) blockPop(key string, timeout time.Duration, left bool) 
 	}
 }
 
-func (d *DistributedMap) BLPop(key string, timeout time.Duration) (interface{}, error) {
+func (d *DistributedMap) BLPop(key string, timeout time.Duration) (any, error) {
 	return d.blockPop(key, timeout, true)
 }
 
-func (d *DistributedMap) BRPop(key string, timeout time.Duration) (interface{}, error) {
+func (d *DistributedMap) BRPop(key string, timeout time.Duration) (any, error) {
 	return d.blockPop(key, timeout, false)
 }
 
 // PushX Variants
 
-func (d *DistributedMap) LPushX(key string, values ...interface{}) (int, error) {
+func (d *DistributedMap) LPushX(key string, values ...any) (int, error) {
 	exists := d.Exists(key)
 	if !exists {
 		return 0, nil
@@ -352,7 +352,7 @@ func (d *DistributedMap) LPushX(key string, values ...interface{}) (int, error) 
 	return d.LPush(key, values...)
 }
 
-func (d *DistributedMap) RPushX(key string, values ...interface{}) (int, error) {
+func (d *DistributedMap) RPushX(key string, values ...any) (int, error) {
 	exists := d.Exists(key)
 	if !exists {
 		return 0, nil
@@ -373,13 +373,13 @@ func (d *DistributedMap) LLen(key string) (int, error) {
 	return item.ListSize, nil
 }
 
-func (d *DistributedMap) LRange(key string, start, stop int) ([]interface{}, error) {
+func (d *DistributedMap) LRange(key string, start, stop int) ([]any, error) {
 	item, err := d.getListItem(key)
 	if err != nil {
 		return nil, err
 	}
 	if item == nil {
-		return []interface{}{}, nil
+		return []any{}, nil
 	}
 
 	item.Mu.RLock()
@@ -387,14 +387,11 @@ func (d *DistributedMap) LRange(key string, start, stop int) ([]interface{}, err
 
 	size := item.ListSize
 	if size == 0 {
-		return []interface{}{}, nil
+		return []any{}, nil
 	}
 
 	if start < 0 {
-		start = size + start
-		if start < 0 {
-			start = 0
-		}
+		start = max(size+start, 0)
 	}
 	if stop < 0 {
 		stop = size + stop
@@ -403,10 +400,10 @@ func (d *DistributedMap) LRange(key string, start, stop int) ([]interface{}, err
 		stop = size - 1
 	}
 	if start > stop {
-		return []interface{}{}, nil
+		return []any{}, nil
 	}
 
-	result := make([]interface{}, 0, stop-start+1)
+	result := make([]any, 0, stop-start+1)
 
 	curr := item.ListHead
 	for i := 0; i < start; i++ {
@@ -420,7 +417,7 @@ func (d *DistributedMap) LRange(key string, start, stop int) ([]interface{}, err
 	return result, nil
 }
 
-func (d *DistributedMap) LIndex(key string, index int) (interface{}, error) {
+func (d *DistributedMap) LIndex(key string, index int) (any, error) {
 	item, err := d.getListItem(key)
 	if err != nil {
 		return nil, err
@@ -458,7 +455,7 @@ func (d *DistributedMap) LIndex(key string, index int) (interface{}, error) {
 	return val, nil
 }
 
-func (d *DistributedMap) LSet(key string, index int, value interface{}) error {
+func (d *DistributedMap) LSet(key string, index int, value any) error {
 	item, err := d.getListItem(key)
 	if err != nil {
 		return err
@@ -517,10 +514,7 @@ func (d *DistributedMap) LTrim(key string, start, stop int) error {
 
 	size := item.ListSize
 	if start < 0 {
-		start = size + start
-		if start < 0 {
-			start = 0
-		}
+		start = max(size+start, 0)
 	}
 	if stop < 0 {
 		stop = size + stop
@@ -568,7 +562,7 @@ func (d *DistributedMap) LTrim(key string, start, stop int) error {
 	return nil
 }
 
-func (d *DistributedMap) LRem(key string, count int, value interface{}) (int, error) {
+func (d *DistributedMap) LRem(key string, count int, value any) (int, error) {
 	strVal := ""
 	switch v := value.(type) {
 	case string:

@@ -182,7 +182,7 @@ func TestComprehensiveIntegration(t *testing.T) {
 		// go-redis XAddArgs
 		id, err := rdb.XAdd(ctx, &redis.XAddArgs{
 			Stream: "mystream",
-			Values: map[string]interface{}{"f1": "v1"},
+			Values: map[string]any{"f1": "v1"},
 		}).Result()
 		if err != nil {
 			t.Fatal(err)
@@ -196,7 +196,7 @@ func TestComprehensiveIntegration(t *testing.T) {
 	// Complex case: concurrent operations via map
 	t.Run("Concurrent", func(t *testing.T) {
 		done := make(chan bool)
-		for i := 0; i < 10; i++ {
+		for i := range 10 {
 			go func(id int) {
 				key := fmt.Sprintf("ckey:%d", id)
 				rdb.Set(ctx, key, id, 0)
@@ -204,7 +204,7 @@ func TestComprehensiveIntegration(t *testing.T) {
 				done <- true
 			}(i)
 		}
-		for i := 0; i < 10; i++ {
+		for range 10 {
 			<-done
 		}
 	})

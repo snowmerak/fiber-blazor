@@ -65,10 +65,10 @@ func TestConcurrency(t *testing.T) {
 
 	// Concurrent Sets
 	wg.Add(numRoutines)
-	for i := 0; i < numRoutines; i++ {
+	for i := range numRoutines {
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < numOps; j++ {
+			for j := range numOps {
 				key := fmt.Sprintf("key-%d-%d", id, j)
 				db.Set(key, j, 0)
 			}
@@ -78,10 +78,10 @@ func TestConcurrency(t *testing.T) {
 
 	// Concurrent Gets
 	wg.Add(numRoutines)
-	for i := 0; i < numRoutines; i++ {
+	for i := range numRoutines {
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < numOps; j++ {
+			for j := range numOps {
 				key := fmt.Sprintf("key-%d-%d", id, j)
 				val, ok := db.Get(key)
 				if !ok {

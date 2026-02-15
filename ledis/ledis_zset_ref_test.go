@@ -127,35 +127,35 @@ func TestZRangeByScore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ZRangeByScore failed: %v", err)
 	}
-	expected := []interface{}{"two", "three", "four"}
+	expected := []any{"two", "three", "four"}
 	if !reflect.DeepEqual(res, expected) {
 		t.Errorf("ZRangeByScore 2 4 wrong. Got %v", res)
 	}
 
 	// -inf <= score <= 2 -> one, two
 	res, err = db.ZRangeByScore(key, math.Inf(-1), 2, false, 0, -1)
-	expected = []interface{}{"one", "two"}
+	expected = []any{"one", "two"}
 	if !reflect.DeepEqual(res, expected) {
 		t.Errorf("ZRangeByScore -inf 2 wrong. Got %v", res)
 	}
 
 	// 4 <= score <= +inf -> four, five
 	res, err = db.ZRangeByScore(key, 4, math.Inf(1), false, 0, -1)
-	expected = []interface{}{"four", "five"}
+	expected = []any{"four", "five"}
 	if !reflect.DeepEqual(res, expected) {
 		t.Errorf("ZRangeByScore 4 +inf wrong. Got %v", res)
 	}
 
 	// Offset 1, Count 1 with 2 <= score <= 4 -> three
 	res, err = db.ZRangeByScore(key, 2, 4, false, 1, 1)
-	expected = []interface{}{"three"}
+	expected = []any{"three"}
 	if !reflect.DeepEqual(res, expected) {
 		t.Errorf("ZRangeByScore offset 1 count 1 wrong. Got %v", res)
 	}
 
 	// Reverse 4 >= score >= 2 -> four, three, two
 	res, err = db.ZRevRangeByScore(key, 4, 2, false, 0, -1)
-	expected = []interface{}{"four", "three", "two"}
+	expected = []any{"four", "three", "two"}
 	if !reflect.DeepEqual(res, expected) {
 		t.Errorf("ZRevRangeByScore 4 2 wrong. Got %v", res)
 	}

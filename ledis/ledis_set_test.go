@@ -184,7 +184,7 @@ func TestSPop(t *testing.T) {
 	}
 }
 
-func toStringSlice(interfaces []interface{}) []string {
+func toStringSlice(interfaces []any) []string {
 	strs := make([]string, len(interfaces))
 	for i, v := range interfaces {
 		strs[i] = v.(string)

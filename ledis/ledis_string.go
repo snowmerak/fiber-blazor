@@ -13,7 +13,7 @@ var (
 )
 
 // GetSet sets the given key to value and returns the old value.
-func (d *DistributedMap) GetSet(key string, value interface{}) (interface{}, bool) {
+func (d *DistributedMap) GetSet(key string, value any) (any, bool) {
 	// Value must be string for now, or we convert
 	strVal := ""
 	switch v := value.(type) {
@@ -96,15 +96,15 @@ func (d *DistributedMap) GetSet(key string, value interface{}) (interface{}, boo
 }
 
 // MSet sets multiple keys to multiple values.
-func (d *DistributedMap) MSet(pairs map[string]interface{}) {
+func (d *DistributedMap) MSet(pairs map[string]any) {
 	for k, v := range pairs {
 		d.Set(k, v, 0)
 	}
 }
 
 // MGet returns the values of all specified keys.
-func (d *DistributedMap) MGet(keys ...string) []interface{} {
-	values := make([]interface{}, len(keys))
+func (d *DistributedMap) MGet(keys ...string) []any {
+	values := make([]any, len(keys))
 	for i, key := range keys {
 		val, ok := d.Get(key)
 		if ok {

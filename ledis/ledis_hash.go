@@ -88,7 +88,7 @@ func (d *DistributedMap) getOrCreateHashItem(key string) (*Item, error) {
 }
 
 // HSet sets field in the hash stored at key to value.
-func (d *DistributedMap) HSet(key string, field string, value interface{}) (int, error) {
+func (d *DistributedMap) HSet(key string, field string, value any) (int, error) {
 	// Convert value to string
 	strVal := ""
 	switch v := value.(type) {
@@ -121,7 +121,7 @@ func (d *DistributedMap) HSet(key string, field string, value interface{}) (int,
 }
 
 // HGet returns the value associated with field in the hash stored at key.
-func (d *DistributedMap) HGet(key string, field string) (interface{}, error) {
+func (d *DistributedMap) HGet(key string, field string) (any, error) {
 	item, err := d.getHashItem(key)
 	if err != nil {
 		return nil, err // ErrWrongType
@@ -208,7 +208,7 @@ func (d *DistributedMap) HLen(key string) (int, error) {
 }
 
 // HMSet sets the specified fields to their respective values.
-func (d *DistributedMap) HMSet(key string, pairs map[string]interface{}) error {
+func (d *DistributedMap) HMSet(key string, pairs map[string]any) error {
 	item, err := d.getOrCreateHashItem(key)
 	if err != nil {
 		return err
@@ -235,13 +235,13 @@ func (d *DistributedMap) HMSet(key string, pairs map[string]interface{}) error {
 }
 
 // HMGet returns the values associated with the specified fields.
-func (d *DistributedMap) HMGet(key string, fields ...string) ([]interface{}, error) {
+func (d *DistributedMap) HMGet(key string, fields ...string) ([]any, error) {
 	item, err := d.getHashItem(key)
 	if err != nil {
 		return nil, err
 	}
 
-	result := make([]interface{}, len(fields))
+	result := make([]any, len(fields))
 
 	if item == nil {
 		return result, nil // All nil
@@ -261,20 +261,20 @@ func (d *DistributedMap) HMGet(key string, fields ...string) ([]interface{}, err
 }
 
 // HGetAll returns all fields and values of the hash.
-func (d *DistributedMap) HGetAll(key string) (map[string]interface{}, error) {
+func (d *DistributedMap) HGetAll(key string) (map[string]any, error) {
 	item, err := d.getHashItem(key)
 	if err != nil {
 		return nil, err
 	}
 	if item == nil {
-		return make(map[string]interface{}), nil
+		return make(map[string]any), nil
 	}
 
 	item.Mu.RLock()
 	defer item.Mu.RUnlock()
 
 	// Copy to match snapshot isolation semantic
-	result := make(map[string]interface{}, len(item.Hash))
+	result := make(map[string]any, len(item.Hash))
 	for k, v := range item.Hash {
 		result[k] = v
 	}
@@ -302,19 +302,19 @@ func (d *DistributedMap) HKeys(key string) ([]string, error) {
 }
 
 // HVals returns all values in the hash.
-func (d *DistributedMap) HVals(key string) ([]interface{}, error) {
+func (d *DistributedMap) HVals(key string) ([]any, error) {
 	item, err := d.getHashItem(key)
 	if err != nil {
 		return nil, err
 	}
 	if item == nil {
-		return []interface{}{}, nil
+		return []any{}, nil
 	}
 
 	item.Mu.RLock()
 	defer item.Mu.RUnlock()
 
-	vals := make([]interface{}, 0, len(item.Hash))
+	vals := make([]any, 0, len(item.Hash))
 	for _, v := range item.Hash {
 		vals = append(vals, v)
 	}

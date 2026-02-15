@@ -154,7 +154,7 @@ func BenchmarkCommands(b *testing.B) {
 		// We'll standard PUSH/POP cycle in loop
 		b.StopTimer()
 		pipe := client.Pipeline()
-		for i := 0; i < 1000; i++ {
+		for range 1000 {
 			pipe.LPush(ctx, "bench_lpop", "v")
 		}
 		// Batch push if needed, but for benchmark we want pure LPOP speed.
@@ -224,7 +224,7 @@ func BenchmarkCommands(b *testing.B) {
 	runBenchmark(b, "ZRANGE", func(b *testing.B, client *redis.Client) {
 		b.StopTimer()
 		// Fill some data
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			client.ZAdd(ctx, "bench_zset_range", redis.Z{Score: float64(i), Member: fmt.Sprintf("m%d", i)})
 		}
 		b.StartTimer()

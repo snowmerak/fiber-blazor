@@ -92,7 +92,7 @@ func TestPubSubConcurrency(t *testing.T) {
 	wg.Add(subscribers)
 
 	// 100 subscribers to "chat"
-	for i := 0; i < subscribers; i++ {
+	for range subscribers {
 		go func() {
 			defer wg.Done()
 			_, ch := db.Subscribe("chat")
@@ -113,7 +113,7 @@ func TestPubSubConcurrency(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Publish 10 messages
-	for i := 0; i < messages; i++ {
+	for range messages {
 		c := db.Publish("chat", "hello")
 		if c != int64(subscribers) {
 			// This might be flaky if goroutines haven't subscribed yet.

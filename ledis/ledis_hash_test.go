@@ -50,7 +50,7 @@ func TestHashOperations(t *testing.T) {
 	}
 
 	// Test HMSet
-	err = db.HMSet(key, map[string]interface{}{
+	err = db.HMSet(key, map[string]any{
 		"field2": "Value2",
 		"field3": "Value3",
 	})
@@ -63,7 +63,7 @@ func TestHashOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HMGet failed: %v", err)
 	}
-	expected := []interface{}{"World", "Value2", nil}
+	expected := []any{"World", "Value2", nil}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("HMGet wrong. Expected %v, got %v", expected, vals)
 	}

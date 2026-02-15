@@ -192,41 +192,41 @@ func (w *Writer) Write(v Value) error {
 // Better writer methods
 
 func (w *Writer) WriteSimpleString(s string) error {
-	_, err := w.writer.Write([]byte(fmt.Sprintf("+%s\r\n", s)))
+	_, err := fmt.Fprintf(w.writer, "+%s\r\n", s)
 	return err
 }
 
 func (w *Writer) WriteError(s string) error {
-	_, err := w.writer.Write([]byte(fmt.Sprintf("-%s\r\n", s)))
+	_, err := fmt.Fprintf(w.writer, "-%s\r\n", s)
 	return err
 }
 
 func (w *Writer) WriteInteger(i int64) error {
-	_, err := w.writer.Write([]byte(fmt.Sprintf(":%d\r\n", i)))
+	_, err := fmt.Fprintf(w.writer, ":%d\r\n", i)
 	return err
 }
 
 func (w *Writer) WriteBulkString(s string) error {
-	_, err := w.writer.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(s), s)))
+	_, err := fmt.Fprintf(w.writer, "$%d\r\n%s\r\n", len(s), s)
 	return err
 }
 
 func (w *Writer) WriteNull() error {
-	_, err := w.writer.Write([]byte("$-1\r\n"))
+	_, err := fmt.Fprintf(w.writer, "$-1\r\n")
 	return err
 }
 
 func (w *Writer) WriteArray(len int) error {
-	_, err := w.writer.Write([]byte(fmt.Sprintf("*%d\r\n", len)))
+	_, err := fmt.Fprintf(w.writer, "*%d\r\n", len)
 	return err
 }
 
 func (w *Writer) WritePush(len int) error {
-	_, err := w.writer.Write([]byte(fmt.Sprintf(">%d\r\n", len)))
+	_, err := fmt.Fprintf(w.writer, ">%d\r\n", len)
 	return err
 }
 
 func (w *Writer) WriteMap(len int) error {
-	_, err := w.writer.Write([]byte(fmt.Sprintf("%%%d\r\n", len)))
+	_, err := fmt.Fprintf(w.writer, "%%%d\r\n", len)
 	return err
 }

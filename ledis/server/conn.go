@@ -544,7 +544,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			wr.WriteError("ERR wrong number of arguments for 'mset' command")
 			return
 		}
-		pairs := make(map[string]interface{})
+		pairs := make(map[string]any)
 		for i := 0; i < len(args); i += 2 {
 			pairs[args[i]] = args[i+1]
 		}
@@ -971,8 +971,8 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 	}
 }
 
-func stringToInterfaceSlice(args []string) []interface{} {
-	iface := make([]interface{}, len(args))
+func stringToInterfaceSlice(args []string) []any {
+	iface := make([]any, len(args))
 	for i, v := range args {
 		iface[i] = v
 	}

@@ -1,6 +1,7 @@
 package ledis
 
 import (
+	maps0 "maps"
 	"math/rand"
 	"time"
 )
@@ -93,7 +94,7 @@ func (zsl *zskiplist) insert(score float64, member string) *zskiplistNode {
 	}
 
 	x = zslCreateNode(level, score, member)
-	for i := 0; i < level; i++ {
+	for i := range level {
 		x.level[i].forward = update[i].level[i].forward
 		update[i].level[i].forward = x
 
@@ -437,21 +438,21 @@ func (d *DistributedMap) ZIncrBy(key string, increment float64, member string) (
 	return score, nil
 }
 
-func (d *DistributedMap) ZRange(key string, start, stop int64, withScores bool) ([]interface{}, error) {
+func (d *DistributedMap) ZRange(key string, start, stop int64, withScores bool) ([]any, error) {
 	return d.zrangeGeneric(key, start, stop, withScores, false)
 }
 
-func (d *DistributedMap) ZRevRange(key string, start, stop int64, withScores bool) ([]interface{}, error) {
+func (d *DistributedMap) ZRevRange(key string, start, stop int64, withScores bool) ([]any, error) {
 	return d.zrangeGeneric(key, start, stop, withScores, true)
 }
 
-func (d *DistributedMap) zrangeGeneric(key string, start, stop int64, withScores, reverse bool) ([]interface{}, error) {
+func (d *DistributedMap) zrangeGeneric(key string, start, stop int64, withScores, reverse bool) ([]any, error) {
 	item, err := d.getZSetItem(key)
 	if err != nil {
 		return nil, err
 	}
 	if item == nil {
-		return []interface{}{}, nil
+		return []any{}, nil
 	}
 
 	item.Mu.RLock()
@@ -459,15 +460,12 @@ func (d *DistributedMap) zrangeGeneric(key string, start, stop int64, withScores
 
 	z := item.ZSet
 	if z == nil {
-		return []interface{}{}, nil
+		return []any{}, nil
 	}
 
 	length := z.zsl.length
 	if start < 0 {
-		start = length + start
-		if start < 0 {
-			start = 0
-		}
+		start = max(length+start, 0)
 	}
 	if stop < 0 {
 		stop = length + stop
@@ -476,11 +474,11 @@ func (d *DistributedMap) zrangeGeneric(key string, start, stop int64, withScores
 		stop = length - 1
 	}
 	if start > stop {
-		return []interface{}{}, nil
+		return []any{}, nil
 	}
 
 	rangeLen := stop - start + 1
-	result := make([]interface{}, 0, rangeLen)
+	result := make([]any, 0, rangeLen)
 
 	var x *zskiplistNode
 	if reverse {
@@ -489,7 +487,7 @@ func (d *DistributedMap) zrangeGeneric(key string, start, stop int64, withScores
 		x = z.zsl.getNodeByRank(uint64(start + 1))
 	}
 
-	for i := int64(0); i < rangeLen; i++ {
+	for range rangeLen {
 		if x == nil {
 			break
 		}
@@ -509,21 +507,21 @@ func (d *DistributedMap) zrangeGeneric(key string, start, stop int64, withScores
 
 // ZRangeByScore
 
-func (d *DistributedMap) ZRangeByScore(key string, min, max float64, withScores bool, offset, count int64) ([]interface{}, error) {
+func (d *DistributedMap) ZRangeByScore(key string, min, max float64, withScores bool, offset, count int64) ([]any, error) {
 	return d.zrangeByScoreGeneric(key, min, max, withScores, offset, count, false)
 }
 
-func (d *DistributedMap) ZRevRangeByScore(key string, max, min float64, withScores bool, offset, count int64) ([]interface{}, error) {
+func (d *DistributedMap) ZRevRangeByScore(key string, max, min float64, withScores bool, offset, count int64) ([]any, error) {
 	return d.zrangeByScoreGeneric(key, min, max, withScores, offset, count, true)
 }
 
-func (d *DistributedMap) zrangeByScoreGeneric(key string, min, max float64, withScores bool, offset, count int64, reverse bool) ([]interface{}, error) {
+func (d *DistributedMap) zrangeByScoreGeneric(key string, min, max float64, withScores bool, offset, count int64, reverse bool) ([]any, error) {
 	item, err := d.getZSetItem(key)
 	if err != nil {
 		return nil, err
 	}
 	if item == nil {
-		return []interface{}{}, nil
+		return []any{}, nil
 	}
 
 	item.Mu.RLock()
@@ -531,11 +529,11 @@ func (d *DistributedMap) zrangeByScoreGeneric(key string, min, max float64, with
 
 	z := item.ZSet
 	if z == nil {
-		return []interface{}{}, nil
+		return []any{}, nil
 	}
 
 	if count == 0 {
-		return []interface{}{}, nil
+		return []any{}, nil
 	}
 
 	var x *zskiplistNode
@@ -546,22 +544,22 @@ func (d *DistributedMap) zrangeByScoreGeneric(key string, min, max float64, with
 	}
 
 	if x == nil {
-		return []interface{}{}, nil
+		return []any{}, nil
 	}
 
 	// Apply offset
-	for i := int64(0); i < offset; i++ {
+	for range offset {
 		if reverse {
 			x = x.backward
 		} else {
 			x = x.level[0].forward
 		}
 		if x == nil || (reverse && x.score < min) || (!reverse && x.score > max) {
-			return []interface{}{}, nil
+			return []any{}, nil
 		}
 	}
 
-	result := make([]interface{}, 0)
+	result := make([]any, 0)
 	limit := count
 	if limit < 0 {
 		limit = z.zsl.length
@@ -678,9 +676,7 @@ func (d *DistributedMap) ZInterStore(destination string, keys ...string) (int64,
 		item.Mu.RLock()
 		if item.Type == TypeZSet {
 			if item.ZSet != nil {
-				for member, score := range item.ZSet.dict {
-					m[member] = score
-				}
+				maps0.Copy(m, item.ZSet.dict)
 			}
 		} else if item.Type == TypeSet {
 			// Access set data

@@ -19,7 +19,7 @@ func TestStringOperations(t *testing.T) {
 	}
 
 	// Test MSet and MGet
-	db.MSet(map[string]interface{}{
+	db.MSet(map[string]any{
 		"mkey1": "mval1",
 		"mkey2": "mval2",
 	})
@@ -107,7 +107,7 @@ func TestParallelIncr(t *testing.T) {
 
 	done := make(chan bool)
 
-	for i := 0; i < count; i++ {
+	for range count {
 		go func() {
 			_, err := db.Incr(key)
 			if err != nil {
@@ -117,7 +117,7 @@ func TestParallelIncr(t *testing.T) {
 		}()
 	}
 
-	for i := 0; i < count; i++ {
+	for range count {
 		<-done
 	}
 

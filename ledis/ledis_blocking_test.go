@@ -32,7 +32,7 @@ func TestPushX(t *testing.T) {
 	}
 
 	vals, _ := db.LRange(key, 0, -1)
-	expected := []interface{}{"b", "init"}
+	expected := []any{"b", "init"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("LPushX values wrong. Found %v", vals)
 	}

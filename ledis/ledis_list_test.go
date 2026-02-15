@@ -24,7 +24,7 @@ func TestListBasics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LRange failed: %v", err)
 	}
-	expected := []interface{}{"c", "b", "a"}
+	expected := []any{"c", "b", "a"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("LPush order wrong. Expected %v, got %v", expected, vals)
 	}
@@ -40,7 +40,7 @@ func TestListBasics(t *testing.T) {
 	}
 
 	vals, _ = db.LRange(key, 0, -1)
-	expected = []interface{}{"c", "b", "a", "1", "2"}
+	expected = []any{"c", "b", "a", "1", "2"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("RPush order wrong. Expected %v, got %v", expected, vals)
 	}
@@ -74,7 +74,7 @@ func TestListBasics(t *testing.T) {
 
 	// Remaining: [b, a, 1]
 	vals, _ = db.LRange(key, 0, -1)
-	expected = []interface{}{"b", "a", "1"}
+	expected = []any{"b", "a", "1"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("List state wrong after pops. Expected %v, got %v", expected, vals)
 	}
@@ -129,7 +129,7 @@ func TestListManipulation(t *testing.T) {
 		t.Errorf("LTrim failed: %v", err)
 	}
 	vals, _ := db.LRange(key, 0, -1)
-	expected := []interface{}{"2", "three", "four"}
+	expected := []any{"2", "three", "four"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("LTrim result wrong. Expected %v, got %v", expected, vals)
 	}
@@ -153,7 +153,7 @@ func TestLRem(t *testing.T) {
 
 	// Expected: [b, c, a, d]
 	vals, _ := db.LRange(key, 0, -1)
-	expected := []interface{}{"b", "c", "a", "d"}
+	expected := []any{"b", "c", "a", "d"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("LRem(2, a) result wrong. Expected %v, got %v", expected, vals)
 	}
@@ -166,7 +166,7 @@ func TestLRem(t *testing.T) {
 	db.LRem(key, -2, "a")
 	// Expected: [a, b, c, d]
 	vals, _ = db.LRange(key, 0, -1)
-	expected = []interface{}{"a", "b", "c", "d"}
+	expected = []any{"a", "b", "c", "d"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("LRem(-2, a) result wrong. Expected %v, got %v", expected, vals)
 	}
@@ -176,7 +176,7 @@ func TestLRem(t *testing.T) {
 	// Remove all 'a'
 	db.LRem(key, 0, "a")
 	vals, _ = db.LRange(key, 0, -1)
-	expected = []interface{}{"b"}
+	expected = []any{"b"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("LRem(0, a) result wrong. Expected %v, got %v", expected, vals)
 	}

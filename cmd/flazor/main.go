@@ -64,8 +64,8 @@ func generateSkill(root string) error {
 	var modName string
 	for _, line := range modLines {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "module ") {
-			modName = strings.TrimPrefix(line, "module ")
+		if after, ok := strings.CutPrefix(line, "module "); ok {
+			modName = after
 			break
 		}
 	}
