@@ -9,7 +9,7 @@ func TestStreamBasics(t *testing.T) {
 	key := "mystream"
 
 	// XADD
-	id1, err := db.XAdd(key, "*", "sensor-id", "1234", "temp", "19.8")
+	id1, err := db.XAdd(key, "*", 0, "sensor-id", "1234", "temp", "19.8")
 	if err != nil {
 		t.Fatalf("XAdd failed: %v", err)
 	}
@@ -17,7 +17,7 @@ func TestStreamBasics(t *testing.T) {
 		t.Fatal("XAdd returned empty ID")
 	}
 
-	id2, err := db.XAdd(key, "*", "sensor-id", "1234", "temp", "20.4")
+	id2, err := db.XAdd(key, "*", 0, "sensor-id", "1234", "temp", "20.4")
 	if err != nil {
 		t.Fatalf("XAdd 2 failed: %v", err)
 	}
@@ -61,26 +61,26 @@ func TestStreamIDValidation(t *testing.T) {
 	key := "stream_id_test"
 
 	// 100-1
-	_, err := db.XAdd(key, "100-1", "f", "v")
+	_, err := db.XAdd(key, "100-1", 0, "f", "v")
 	if err != nil {
 		t.Fatalf("XAdd 100-1 failed: %v", err)
 	}
 
 	// 100-1 duplicate (should fail)
-	_, err = db.XAdd(key, "100-1", "f", "v")
+	_, err = db.XAdd(key, "100-1", 0, "f", "v")
 	if err == nil {
 		t.Error("XAdd duplicate 100-1 should fail")
 	}
 
 	// 100-0 smaller (should fail)
-	_, err = db.XAdd(key, "100-0", "f", "v")
+	_, err = db.XAdd(key, "100-0", 0, "f", "v")
 	if err == nil {
 		t.Error("XAdd smaller 100-0 should fail")
 	}
 
 	// 0-0 (should fail)
 	db.Del(key)
-	_, err = db.XAdd(key, "0-0", "f", "v")
+	_, err = db.XAdd(key, "0-0", 0, "f", "v")
 	if err == nil {
 		t.Error("XAdd 0-0 should fail")
 	}
@@ -91,10 +91,10 @@ func TestXRead(t *testing.T) {
 	k1 := "s1"
 	k2 := "s2"
 
-	id1_1, _ := db.XAdd(k1, "*", "k", "v1")
-	id1_2, _ := db.XAdd(k1, "*", "k", "v2")
+	id1_1, _ := db.XAdd(k1, "*", 0, "k", "v1")
+	id1_2, _ := db.XAdd(k1, "*", 0, "k", "v2")
 
-	_, _ = db.XAdd(k2, "*", "k", "v3")
+	_, _ = db.XAdd(k2, "*", 0, "k", "v3")
 
 	// XREAD s1 from 0, s2 from 0
 	streams := map[string]string{

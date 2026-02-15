@@ -159,7 +159,8 @@ func (s *Stream) generateID(id string) (string, error) {
 
 // XAdd appends a new entry to the stream.
 // id: "*" for auto-generate.
-func (d *DistributedMap) XAdd(key string, id string, fields ...string) (string, error) {
+// maxLen: 0 for no limit, >0 for exact limit.
+func (d *DistributedMap) XAdd(key string, id string, maxLen int64, fields ...string) (string, error) {
 	if len(fields)%2 != 0 {
 		return "", errors.New("wrong number of arguments for XADD")
 	}
@@ -200,7 +201,50 @@ func (d *DistributedMap) XAdd(key string, id string, fields ...string) (string, 
 	s.Entries = append(s.Entries, entry)
 	s.lastID = newID
 
+	// Trim if needed
+	if maxLen > 0 && int64(len(s.Entries)) > maxLen {
+		// Remove from head
+		start := int64(len(s.Entries)) - maxLen
+		if start > 0 {
+			s.Entries = s.Entries[start:]
+		}
+	}
+
 	return newID, nil
+}
+
+// XTrim trims the stream to maxLen.
+// Returns the number of entries deleted.
+func (d *DistributedMap) XTrim(key string, maxLen int64) (int64, error) {
+	if maxLen < 0 {
+		return 0, errors.New("maxLen must be >= 0")
+	}
+
+	item, err := d.getStreamItem(key)
+	if err != nil {
+		return 0, err
+	}
+	if item == nil {
+		return 0, nil
+	}
+
+	item.Mu.Lock()
+	defer item.Mu.Unlock()
+
+	s := item.Stream
+	if s == nil {
+		return 0, nil
+	}
+
+	currentLen := int64(len(s.Entries))
+	if currentLen <= maxLen {
+		return 0, nil
+	}
+
+	removeCount := currentLen - maxLen
+	s.Entries = s.Entries[removeCount:]
+
+	return removeCount, nil
 }
 
 // XLen returns the number of entries in the stream.

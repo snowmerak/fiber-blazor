@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/snowmerak/fiber-blazor/ledis"
 )
 
@@ -68,5 +69,55 @@ func TestRueidisIntegration(t *testing.T) {
 	}
 	if val != "rueidis_val" {
 		t.Errorf("GET expected rueidis_val, got %s", val)
+	}
+}
+
+func TestStreamTrimIntegration(t *testing.T) {
+	db := ledis.New(16)
+	rdb := NewGoRedisClient(db)
+	defer rdb.Close()
+	defer db.Close()
+
+	ctx := context.Background()
+
+	// XADD with MAXLEN
+	// go-redis XAddArgs: Stream, MaxLen, MaxLenApprox, ID, Values
+	for i := 0; i < 5; i++ {
+		err := rdb.XAdd(ctx, &redis.XAddArgs{
+			Stream: "stream_trim",
+			MaxLen: 3,
+			ID:     "*",
+			Values: map[string]interface{}{"key": "val"},
+		}).Err()
+		if err != nil {
+			t.Fatalf("XAdd failed: %v", err)
+		}
+	}
+
+	// Check Len
+	l, err := rdb.XLen(ctx, "stream_trim").Result()
+	if err != nil {
+		t.Fatalf("XLen failed: %v", err)
+	}
+	if l != 3 {
+		t.Errorf("Expected len 3 (capped by MAXLEN), got %d", l)
+	}
+
+	// XTRIM
+	// Explicitly trim to 1
+	n, err := rdb.XTrimMaxLen(ctx, "stream_trim", 1).Result()
+	if err != nil {
+		t.Fatalf("XTrim failed: %v", err)
+	}
+	if n != 2 { // 3 - 1 = 2 deleted
+		t.Errorf("Expected 2 deleted, got %d", n)
+	}
+
+	l, err = rdb.XLen(ctx, "stream_trim").Result()
+	if err != nil {
+		t.Fatalf("XLen after trim failed: %v", err)
+	}
+	if l != 1 {
+		t.Errorf("Expected len 1 after XTRIM, got %d", l)
 	}
 }

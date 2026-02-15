@@ -963,19 +963,246 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 
 	// --- Stream ---
 	case "XADD":
+		// XADD key [MAXLEN [=] count] ID field value ...
 		if len(args) < 2 {
 			wr.WriteError("ERR wrong number of arguments for 'xadd' command")
 			return
 		}
-		id, err := c.db.XAdd(args[0], args[1], args[2:]...)
+
+		key := args[0]
+		currentIdx := 1
+		maxLen := int64(0)
+
+		// Check for MAXLEN
+		if currentIdx+1 < len(args) && strings.ToUpper(args[currentIdx]) == "MAXLEN" {
+			currentIdx++
+			// Check for optional "="
+			if currentIdx < len(args) && args[currentIdx] == "=" {
+				currentIdx++
+			}
+			// Parse count
+			if currentIdx < len(args) {
+				var err error
+				maxLen, err = strconv.ParseInt(args[currentIdx], 10, 64)
+				if err != nil {
+					wr.WriteError("ERR value is not an integer or out of range")
+					return
+				}
+				currentIdx++
+			} else {
+				wr.WriteError("ERR syntax error for MAXLEN")
+				return
+			}
+		}
+
+		if currentIdx >= len(args) {
+			wr.WriteError("ERR wrong number of arguments for 'xadd' command")
+			return
+		}
+
+		id := args[currentIdx]
+		currentIdx++
+
+		// Remaining args are field/value pairs
+		fields := args[currentIdx:]
+		if len(fields) == 0 || len(fields)%2 != 0 {
+			wr.WriteError("ERR wrong number of arguments for 'xadd' command")
+			return
+		}
+
+		newID, err := c.db.XAdd(key, id, maxLen, fields...)
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
-			wr.WriteBulkString(id)
+			wr.WriteBulkString(newID)
+		}
+
+	case "XTRIM":
+		// XTRIM key MAXLEN [=] count
+		if len(args) < 3 {
+			wr.WriteError("ERR wrong number of arguments for 'xtrim' command")
+			return
+		}
+
+		key := args[0]
+		// Arg 1 must be MAXLEN (for now, simplistic parser)
+		if strings.ToUpper(args[1]) != "MAXLEN" {
+			wr.WriteError("ERR syntax error")
+			return
+		}
+
+		// Arg 2 could be "=" or count
+		countIdx := 2
+		if args[countIdx] == "=" {
+			countIdx++
+		}
+
+		if countIdx >= len(args) {
+			wr.WriteError("ERR syntax error")
+			return
+		}
+
+		maxLen, err := strconv.ParseInt(args[countIdx], 10, 64)
+		if err != nil {
+			wr.WriteError("ERR value is not an integer or out of range")
+			return
+		}
+
+		deleted, err := c.db.XTrim(key, maxLen)
+		if err != nil {
+			wr.WriteError(err.Error())
+		} else {
+			wr.WriteInteger(deleted)
+		}
+
+	case "XLEN":
+		if len(args) != 1 {
+			wr.WriteError("ERR wrong number of arguments for 'xlen' command")
+			return
+		}
+		if c.tracking {
+			c.db.Track(args[0], c)
+		}
+		l, err := c.db.XLen(args[0])
+		if err != nil {
+			wr.WriteInteger(0)
+		} else {
+			wr.WriteInteger(l)
+		}
+
+	case "XRANGE":
+		if len(args) != 3 {
+			wr.WriteError("ERR wrong number of arguments for 'xrange' command")
+			return
+		}
+		if c.tracking {
+			c.db.Track(args[0], c)
+		}
+		// XRANGE key start end
+		entries, err := c.db.XRange(args[0], args[1], args[2])
+		if err != nil {
+			wr.WriteArray(0)
+		} else {
+			c.writeStreamEntries(wr, entries)
+		}
+
+	case "XREVRANGE":
+		if len(args) != 3 {
+			wr.WriteError("ERR wrong number of arguments for 'xrevrange' command")
+			return
+		}
+		if c.tracking {
+			c.db.Track(args[0], c)
+		}
+		// XREVRANGE key end start
+		entries, err := c.db.XRevRange(args[0], args[1], args[2])
+		if err != nil {
+			wr.WriteArray(0)
+		} else {
+			c.writeStreamEntries(wr, entries)
+		}
+
+	case "XREAD":
+		// XREAD [COUNT count] [BLOCK milliseconds] STREAMS key [key ...] id [id ...]
+		// Minimal parsing for now
+		streamsIdx := -1
+		count := 0
+		block := 0
+
+		for i := 0; i < len(args); i++ {
+			arg := strings.ToUpper(args[i])
+			if arg == "STREAMS" {
+				streamsIdx = i
+				break
+			} else if arg == "COUNT" {
+				if i+1 < len(args) {
+					c, err := strconv.Atoi(args[i+1])
+					if err == nil {
+						count = c
+					}
+					i++
+				}
+			} else if arg == "BLOCK" {
+				if i+1 < len(args) {
+					// Blocking not fully supported in this snippet, but parsing it
+					b, err := strconv.Atoi(args[i+1])
+					if err == nil {
+						block = b
+					}
+					i++
+				}
+			}
+		}
+
+		if streamsIdx == -1 || streamsIdx+1 >= len(args) {
+			wr.WriteError("ERR syntax error")
+			return
+		}
+
+		// Parts after STREAMS
+		parts := args[streamsIdx+1:]
+		if len(parts)%2 != 0 {
+			wr.WriteError("ERR Unbalanced XREAD list of streams: for each stream key an ID or '$' must be specified.")
+			return
+		}
+
+		numStreams := len(parts) / 2
+		streams := make(map[string]string)
+		for i := 0; i < numStreams; i++ {
+			key := parts[i]
+			id := parts[i+numStreams]
+			streams[key] = id
+			if c.tracking {
+				c.db.Track(key, c)
+			}
+		}
+
+		// Delegate to simple non-blocking read for now
+		// Blocking needs separate logic
+		if block > 0 {
+			// TODO: Block logic
+			wr.WriteError("ERR BLOCK not implemented yet")
+			return
+		}
+
+		res, err := c.db.XRead(streams, count)
+		if err != nil {
+			wr.WriteNull()
+			return
+		}
+
+		if len(res) == 0 {
+			wr.WriteNull() // Or array 0? Redis returns nil for non-blocking if no results
+			return
+		}
+
+		// Write result: Array of [key, entries]
+		wr.WriteArray(len(res))
+		// Map iteration order is random, maybe strictly need preserved order from args?
+		// For verification, lets iterate from args
+		for i := 0; i < numStreams; i++ {
+			key := parts[i]
+			if entries, ok := res[key]; ok {
+				wr.WriteArray(2)
+				wr.WriteBulkString(key)
+				c.writeStreamEntries(wr, entries)
+			}
 		}
 
 	default:
 		wr.WriteError(fmt.Sprintf("ERR unknown command '%s'", cmd))
+	}
+}
+
+func (c *Client) writeStreamEntries(wr *Writer, entries []ledis.StreamEntry) {
+	wr.WriteArray(len(entries))
+	for _, entry := range entries {
+		wr.WriteArray(2)
+		wr.WriteBulkString(entry.ID)
+		wr.WriteArray(len(entry.Fields))
+		for _, field := range entry.Fields {
+			wr.WriteBulkString(field)
+		}
 	}
 }
 
