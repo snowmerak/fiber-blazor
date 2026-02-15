@@ -6,6 +6,7 @@ require (
 	github.com/RoaringBitmap/roaring v1.9.4
 	github.com/a-h/templ v0.3.977
 	github.com/gofiber/fiber/v3 v3.0.0
+	github.com/panjf2000/ants/v2 v2.11.5
 	github.com/redis/go-redis/v9 v9.17.3
 )
 

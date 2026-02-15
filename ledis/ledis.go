@@ -4,11 +4,13 @@ import (
 	"fmt" // Added for fmt.Sprintf in Set method
 	"hash/maphash"
 	"math/bits"
+	"runtime"
 	"strconv" // Added for toInt64
 	"sync"
 	"time"
 
 	"github.com/RoaringBitmap/roaring/roaring64"
+	"github.com/panjf2000/ants/v2"
 )
 
 const (
@@ -21,19 +23,27 @@ const (
 	TypeBitmap
 )
 
+type ListNode struct {
+	Value string
+	Prev  *ListNode
+	Next  *ListNode
+}
+
 type Item struct {
 	Type      uint8
 	ExpiresAt int64
 	Mu        sync.RWMutex // Protects mutable fields
 
 	// Value holders - Concrete types to avoid interface{} boxing
-	Str    string
-	List   []string
-	Hash   map[string]string
-	Set    map[string]struct{}
-	ZSet   *SortedSet
-	Bitmap *roaring64.Bitmap
-	Stream *Stream
+	Str      string
+	ListHead *ListNode
+	ListTail *ListNode
+	ListSize int
+	Hash     map[string]string
+	Set      map[string]struct{}
+	ZSet     *SortedSet
+	Bitmap   *roaring64.Bitmap
+	Stream   *Stream
 
 	// Waiters for blocking list operations
 	Waiters []chan string
@@ -44,7 +54,9 @@ func (i *Item) reset() {
 	i.ExpiresAt = 0
 	// Mu state is not reset, but if we reuse, we assume no one holds lock
 	i.Str = ""
-	i.List = nil
+	i.ListHead = nil
+	i.ListTail = nil
+	i.ListSize = 0
 	i.Hash = nil
 	i.Set = nil
 	i.ZSet = nil
@@ -104,6 +116,8 @@ type DistributedMap struct {
 	invalidationTable map[string]map[Observer]struct{}
 	clientKeys        map[Observer]map[string]struct{}
 	mu                sync.RWMutex
+
+	WorkerPool *ants.Pool
 }
 
 type Observer interface {
@@ -203,6 +217,8 @@ func New(size int) *DistributedMap {
 		shards[i] = &sync.Map{}
 	}
 
+	pool, _ := ants.NewPool(runtime.NumCPU() * 4)
+
 	return &DistributedMap{
 		shards:            shards,
 		mask:              uint64(size - 1),
@@ -210,7 +226,12 @@ func New(size int) *DistributedMap {
 		pubsub:            NewPubSub(),
 		invalidationTable: make(map[string]map[Observer]struct{}),
 		clientKeys:        make(map[Observer]map[string]struct{}),
+		WorkerPool:        pool,
 	}
+}
+
+func (d *DistributedMap) Close() {
+	d.WorkerPool.Release()
 }
 
 func (d *DistributedMap) hash(key string) uint64 {
@@ -265,7 +286,18 @@ func (d *DistributedMap) Set(key string, value interface{}, duration time.Durati
 		item.Str = v
 	case []string:
 		item.Type = TypeList
-		item.List = v
+		for _, s := range v {
+			node := &ListNode{Value: s}
+			if item.ListHead == nil {
+				item.ListHead = node
+				item.ListTail = node
+			} else {
+				item.ListTail.Next = node
+				node.Prev = item.ListTail
+				item.ListTail = node
+			}
+			item.ListSize++
+		}
 	case map[string]string:
 		item.Type = TypeHash
 		item.Hash = v
@@ -319,7 +351,14 @@ func (d *DistributedMap) Get(key string) (interface{}, bool) {
 	case TypeString:
 		return item.Str, true
 	case TypeList:
-		return item.List, true
+		// Convert to []string
+		res := make([]string, 0, item.ListSize)
+		curr := item.ListHead
+		for curr != nil {
+			res = append(res, curr.Value)
+			curr = curr.Next
+		}
+		return res, true
 	case TypeHash:
 		return item.Hash, true
 	case TypeSet:

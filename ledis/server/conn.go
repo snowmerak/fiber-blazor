@@ -53,7 +53,7 @@ func (c *Client) Invalidate(key string) {
 	// We'll proceed optimistically or use atomic load if needed.
 	// Given SCC is "Server-Assisted" and allows some laxity, current async approach is fine.
 
-	go func() {
+	_ = c.db.WorkerPool.Submit(func() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if !c.tracking {
@@ -65,7 +65,7 @@ func (c *Client) Invalidate(key string) {
 		c.writer.WriteBulkString("invalidate")
 		c.writer.WriteArray(1)
 		c.writer.WriteBulkString(key)
-	}()
+	})
 }
 
 func (h *Handler) Handle(conn net.Conn) {

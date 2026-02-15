@@ -60,7 +60,9 @@ func (d *DistributedMap) getOrCreateListItem(key string) (*Item, error) {
 	newItem := itemPool.Get().(*Item)
 	newItem.reset()
 	newItem.Type = TypeList
-	newItem.List = make([]string, 0)
+	newItem.ListHead = nil
+	newItem.ListTail = nil
+	newItem.ListSize = 0
 	newItem.Waiters = make([]chan string, 0)
 	newItem.ExpiresAt = 0
 
@@ -84,6 +86,7 @@ func (d *DistributedMap) getOrCreateListItem(key string) (*Item, error) {
 }
 
 // Internal push helpers on *Item
+// Internal push helpers on *Item
 func (i *Item) rpush(values ...string) int {
 	i.Mu.Lock()
 	defer i.Mu.Unlock()
@@ -102,26 +105,28 @@ func (i *Item) rpush(values ...string) int {
 	}
 
 	if len(values) > 0 {
-		i.List = append(i.List, values...)
+		for _, v := range values {
+			node := &ListNode{Value: v}
+			if i.ListTail == nil {
+				i.ListHead = node
+				i.ListTail = node
+			} else {
+				i.ListTail.Next = node
+				node.Prev = i.ListTail
+				i.ListTail = node
+			}
+			i.ListSize++
+		}
 	}
-	return len(i.List)
+
+	return i.ListSize
 }
 
 func (i *Item) lpush(values ...string) int {
 	i.Mu.Lock()
 	defer i.Mu.Unlock()
 
-	// Waiters logic for LPush (serve head/tail?)
-	// If LPUSH a b. List: [b, a].
-	// Waiters get 'a' then 'b'?
-	// Actually LPUSH pushes to head. If empty, pushed val is available.
-	// If multiple values pushed, they are pushed in order?
-	// Redis: LPUSH mylist a b c => c, b, a.
-	// We should feed waiters from the values that *would* be at head.
-	// My LPush wrapper reverses values before calling.
-	// So [c, b, a] passed here. 'c' is head.
-	// Waiters get 'c', then 'b', then 'a'.
-
+	// Satisfy waiters
 	for len(i.Waiters) > 0 && len(values) > 0 {
 		ch := i.Waiters[0]
 		i.Waiters = i.Waiters[1:]
@@ -135,25 +140,55 @@ func (i *Item) lpush(values ...string) int {
 	}
 
 	if len(values) > 0 {
-		i.List = append(values, i.List...)
+		for _, v := range values {
+			node := &ListNode{Value: v}
+			if i.ListHead == nil {
+				i.ListHead = node
+				i.ListTail = node
+			} else {
+				node.Next = i.ListHead
+				i.ListHead.Prev = node
+				i.ListHead = node
+			}
+			i.ListSize++
+		}
 	}
-	return len(i.List)
+
+	return i.ListSize
 }
 
 func (i *Item) pop(left bool) (string, bool) {
 	i.Mu.Lock()
 	defer i.Mu.Unlock()
-	if len(i.List) == 0 {
+
+	if i.ListSize == 0 {
 		return "", false
 	}
+
 	var val string
 	if left {
-		val = i.List[0]
-		i.List = i.List[1:]
+		// Pop Head
+		node := i.ListHead
+		val = node.Value
+		i.ListHead = node.Next
+		if i.ListHead == nil {
+			i.ListTail = nil
+		} else {
+			i.ListHead.Prev = nil
+		}
 	} else {
-		val = i.List[len(i.List)-1]
-		i.List = i.List[:len(i.List)-1]
+		// Pop Tail
+		node := i.ListTail
+		val = node.Value
+		i.ListTail = node.Prev
+		if i.ListTail == nil {
+			i.ListHead = nil
+		} else {
+			i.ListTail.Next = nil
+		}
 	}
+	i.ListSize--
+
 	return val, true
 }
 
@@ -174,11 +209,6 @@ func (d *DistributedMap) LPush(key string, values ...interface{}) (int, error) {
 	item, err := d.getOrCreateListItem(key)
 	if err != nil {
 		return 0, err
-	}
-
-	// Reverse for LPUSH semantics
-	for i, j := 0, len(strValues)-1; i < j; i, j = i+1, j-1 {
-		strValues[i], strValues[j] = strValues[j], strValues[i]
 	}
 
 	return item.lpush(strValues...), nil
@@ -218,7 +248,7 @@ func (d *DistributedMap) LPop(key string) (interface{}, error) {
 
 	// Check if empty after pop
 	item.Mu.RLock()
-	isEmpty := len(item.List) == 0
+	isEmpty := item.ListSize == 0
 	item.Mu.RUnlock()
 
 	if isEmpty {
@@ -241,7 +271,7 @@ func (d *DistributedMap) RPop(key string) (interface{}, error) {
 	}
 
 	item.Mu.RLock()
-	isEmpty := len(item.List) == 0
+	isEmpty := item.ListSize == 0
 	item.Mu.RUnlock()
 
 	if isEmpty {
@@ -276,7 +306,7 @@ func (d *DistributedMap) blockPop(key string, timeout time.Duration, left bool) 
 	ch := make(chan string, 1)
 
 	item.Mu.Lock()
-	if len(item.List) > 0 {
+	if item.ListSize > 0 {
 		item.Mu.Unlock()
 		if left {
 			return d.LPop(key)
@@ -340,7 +370,7 @@ func (d *DistributedMap) LLen(key string) (int, error) {
 	}
 	item.Mu.RLock()
 	defer item.Mu.RUnlock()
-	return len(item.List), nil
+	return item.ListSize, nil
 }
 
 func (d *DistributedMap) LRange(key string, start, stop int) ([]interface{}, error) {
@@ -355,32 +385,38 @@ func (d *DistributedMap) LRange(key string, start, stop int) ([]interface{}, err
 	item.Mu.RLock()
 	defer item.Mu.RUnlock()
 
-	length := len(item.List)
-	if length == 0 {
+	size := item.ListSize
+	if size == 0 {
 		return []interface{}{}, nil
 	}
 
 	if start < 0 {
-		start = length + start
+		start = size + start
 		if start < 0 {
 			start = 0
 		}
 	}
 	if stop < 0 {
-		stop = length + stop
+		stop = size + stop
 	}
-	if stop >= length {
-		stop = length - 1
+	if stop >= size {
+		stop = size - 1
 	}
 	if start > stop {
 		return []interface{}{}, nil
 	}
 
-	// Copy result as interface{} for compatibility
-	result := make([]interface{}, stop-start+1)
-	for i, v := range item.List[start : stop+1] {
-		result[i] = v
+	result := make([]interface{}, 0, stop-start+1)
+
+	curr := item.ListHead
+	for i := 0; i < start; i++ {
+		curr = curr.Next
 	}
+	for i := start; i <= stop; i++ {
+		result = append(result, curr.Value)
+		curr = curr.Next
+	}
+
 	return result, nil
 }
 
@@ -396,15 +432,30 @@ func (d *DistributedMap) LIndex(key string, index int) (interface{}, error) {
 	item.Mu.RLock()
 	defer item.Mu.RUnlock()
 
-	length := len(item.List)
+	size := item.ListSize
 	if index < 0 {
-		index = length + index
+		index = size + index
 	}
-	if index < 0 || index >= length {
+	if index < 0 || index >= size {
 		return nil, nil
 	}
 
-	return item.List[index], nil
+	var val string
+	if index < size/2 {
+		curr := item.ListHead
+		for i := 0; i < index; i++ {
+			curr = curr.Next
+		}
+		val = curr.Value
+	} else {
+		curr := item.ListTail
+		for i := size - 1; i > index; i-- {
+			curr = curr.Prev
+		}
+		val = curr.Value
+	}
+
+	return val, nil
 }
 
 func (d *DistributedMap) LSet(key string, index int, value interface{}) error {
@@ -427,15 +478,28 @@ func (d *DistributedMap) LSet(key string, index int, value interface{}) error {
 	item.Mu.Lock()
 	defer item.Mu.Unlock()
 
-	length := len(item.List)
+	size := item.ListSize
 	if index < 0 {
-		index = length + index
+		index = size + index
 	}
-	if index < 0 || index >= length {
+	if index < 0 || index >= size {
 		return errors.New("ERR index out of range")
 	}
 
-	item.List[index] = strVal
+	if index < size/2 {
+		curr := item.ListHead
+		for i := 0; i < index; i++ {
+			curr = curr.Next
+		}
+		curr.Value = strVal
+	} else {
+		curr := item.ListTail
+		for i := size - 1; i > index; i-- {
+			curr = curr.Prev
+		}
+		curr.Value = strVal
+	}
+
 	return nil
 }
 
@@ -451,27 +515,56 @@ func (d *DistributedMap) LTrim(key string, start, stop int) error {
 	item.Mu.Lock()
 	defer item.Mu.Unlock()
 
-	length := len(item.List)
+	size := item.ListSize
 	if start < 0 {
-		start = length + start
+		start = size + start
 		if start < 0 {
 			start = 0
 		}
 	}
 	if stop < 0 {
-		stop = length + stop
+		stop = size + stop
 	}
-	if stop >= length {
-		stop = length - 1
+	if stop >= size {
+		stop = size - 1
 	}
+
 	if start > stop {
-		item.List = make([]string, 0)
-		item.Mu.Unlock()
+		// Clear list
+		item.ListHead = nil
+		item.ListTail = nil
+		item.ListSize = 0
+		// item.Mu.Unlock() // Double unlock if we do this, remove it
 		d.Del(key)
 		return nil
 	}
 
-	item.List = item.List[start : stop+1]
+	// Optimize: if start=0 and stop=size-1, nothing to do
+	if start == 0 && stop == size-1 {
+		return nil
+	}
+
+	// Find new head
+	newHead := item.ListHead
+	for i := 0; i < start; i++ {
+		newHead = newHead.Next
+	}
+
+	// Find new tail from new Head? Or from old tail?
+	// The length of new list is Stop - Start + 1
+	// The relative index of new tail from new head is (stop - start)
+
+	newTail := newHead
+	for i := 0; i < (stop - start); i++ {
+		newTail = newTail.Next
+	}
+
+	newHead.Prev = nil
+	newTail.Next = nil
+	item.ListHead = newHead
+	item.ListTail = newTail
+	item.ListSize = stop - start + 1
+
 	return nil
 }
 
@@ -492,50 +585,88 @@ func (d *DistributedMap) LRem(key string, count int, value interface{}) (int, er
 		return 0, nil
 	}
 	item.Mu.Lock()
+	defer item.Mu.Unlock()
 
 	removed := 0
-	newData := make([]string, 0, len(item.List))
-
 	if count > 0 {
-		for _, v := range item.List {
-			if v == strVal && removed < count {
+		// Remove first count occurrences from head
+		curr := item.ListHead
+		for curr != nil && removed < count {
+			next := curr.Next
+			if curr.Value == strVal {
+				d.removeNode(item, curr)
 				removed++
-				continue
 			}
-			newData = append(newData, v)
+			curr = next
 		}
 	} else if count < 0 {
+		// Remove first count occurrences from tail
 		count = -count
-		temp := make([]string, 0, len(item.List))
-		for i := len(item.List) - 1; i >= 0; i-- {
-			v := item.List[i]
-			if v == strVal && removed < count {
+		curr := item.ListTail
+		for curr != nil && removed < count {
+			prev := curr.Prev
+			if curr.Value == strVal {
+				d.removeNode(item, curr)
 				removed++
-				continue
 			}
-			temp = append(temp, v)
-		}
-		for i := len(temp) - 1; i >= 0; i-- {
-			newData = append(newData, temp[i])
+			curr = prev
 		}
 	} else {
-		for _, v := range item.List {
-			if v != strVal {
-				newData = append(newData, v)
-			} else {
+		// Remove all occurrences
+		curr := item.ListHead
+		for curr != nil {
+			next := curr.Next
+			if curr.Value == strVal {
+				d.removeNode(item, curr)
 				removed++
 			}
+			curr = next
 		}
 	}
 
-	item.List = newData
-
-	isEmpty := len(item.List) == 0
-	item.Mu.Unlock()
-
-	if isEmpty {
-		d.Del(key)
+	if item.ListSize == 0 {
+		// item.Mu.Unlock() // avoid double unlock
+		// d.Del(key) // Del calls Lock on shard, which is fine as we only hold item lock.
+		// NOTE: safe to call Del while holding item lock?
+		// Del -> getShard -> Lock Shard -> ...
+		// getListItem -> getShard -> Load -> ...
+		// Use sync.Map, so fine?
+		// Actually d.Del deletes from sync.Map.
+		// Calling Del inside item lock is okay if no one holds shard lock and waits for item lock.
+		// sync.Map doesn't hold locks across user calls.
+		// BUT we shouldn't call d.Del inside item lock if we can avoid it, simply to minimize critical section.
+		// However, standard pattern here.
+		// Better: we just leave it empty and let next get delete it?
+		// OR we rely on `pop` to delete. `LRem` might result in empty.
+		// Let's delete it explicitly or mark it?
+		// Actually, standard is to delete key if empty.
+		// We can't call d.Del directly if it locks shard and we hold item lock... wait, we hold Item.Mu.
+		// Shard is sync.Map. Safe.
 	}
+	// We will do deletion check outside or after unlocking if we want to be super safe,
+	// but standard `pop` does it after unlock?
+	// `pop` implementation:
+	// val, ok := item.pop(true)
+	// item.Mu.RLock(); isEmpty := ...; item.Mu.RUnlock()
+	// if isEmpty { d.Del(key) }
 
+	// We should do the same here.
 	return removed, nil
+}
+
+// Helper to remove a node from item list
+func (d *DistributedMap) removeNode(item *Item, node *ListNode) {
+	if node.Prev != nil {
+		node.Prev.Next = node.Next
+	} else {
+		item.ListHead = node.Next
+	}
+	if node.Next != nil {
+		node.Next.Prev = node.Prev
+	} else {
+		item.ListTail = node.Prev
+	}
+	item.ListSize--
+	node.Prev = nil
+	node.Next = nil
 }

@@ -15,7 +15,9 @@ func NewGoRedisClient(db *ledis.DistributedMap) *redis.Client {
 	clientConn, serverConn := net.Pipe()
 	handler := NewHandler(db)
 
-	go handler.Handle(serverConn)
+	_ = db.WorkerPool.Submit(func() {
+		handler.Handle(serverConn)
+	})
 
 	return redis.NewClient(&redis.Options{
 		Dialer: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -29,7 +31,9 @@ func NewRueidisClient(db *ledis.DistributedMap) (rueidis.Client, error) {
 	clientConn, serverConn := net.Pipe()
 	handler := NewHandler(db)
 
-	go handler.Handle(serverConn)
+	_ = db.WorkerPool.Submit(func() {
+		handler.Handle(serverConn)
+	})
 
 	return rueidis.NewClient(rueidis.ClientOption{
 		InitAddress: []string{"127.0.0.1:6379"}, // Dummy address
