@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/redis/rueidis"
 	"github.com/snowmerak/fiber-blazor/ledis"
 )
 
@@ -17,9 +18,9 @@ import (
 // 2. Connect to Ledis.
 // 3. Connect to Redis (localhost:6379) - Fail gracefully if not available.
 
-func setupLedisBenchmark(b *testing.B) (*redis.Client, func()) {
+func setupLedisServer(b *testing.B) (string, func()) {
 	// Start Ledis
-	db := ledis.New(1024) // Larger size for bench? 1024 slots is fine.
+	db := ledis.New(1024)
 	handler := NewHandler(db)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -37,13 +38,37 @@ func setupLedisBenchmark(b *testing.B) (*redis.Client, func()) {
 		}
 	}()
 
+	return ln.Addr().String(), func() {
+		ln.Close()
+	}
+}
+
+func setupLedisBenchmark(b *testing.B) (*redis.Client, func()) {
+	addr, cleanupServer := setupLedisServer(b)
+
 	client := redis.NewClient(&redis.Options{
-		Addr: ln.Addr().String(),
+		Addr: addr,
 	})
 
 	return client, func() {
 		client.Close()
-		ln.Close()
+		cleanupServer()
+	}
+}
+
+func setupRueidisLedisBenchmark(b *testing.B) (rueidis.Client, func()) {
+	addr, cleanupServer := setupLedisServer(b)
+
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress: []string{addr},
+	})
+	if err != nil {
+		b.Fatalf("failed to create rueidis client: %v", err)
+	}
+
+	return client, func() {
+		client.Close()
+		cleanupServer()
 	}
 }
 
@@ -65,14 +90,43 @@ func setupRedisBenchmark(b *testing.B) (*redis.Client, func()) {
 		return nil, nil
 	}
 
-	// FLUSHDB to start clean? Maybe risky if user has data.
-	// Uses a random prefix or DB 1?
-	// Let's use DB 1
 	client = redis.NewClient(&redis.Options{
 		Addr: redisAddr,
 		DB:   1,
 	})
 	client.FlushDB(context.Background())
+
+	return client, func() {
+		client.Close()
+	}
+}
+
+func setupRueidisRedisBenchmark(b *testing.B) (rueidis.Client, func()) {
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
+
+	// Check availability with go-redis (lazy shortcut or use rueidis to ping?)
+	// Using rueidis to ping
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress: []string{redisAddr},
+		SelectDB:    1,
+	})
+	if err != nil {
+		b.Skipf("Redis not available at %s: %v", redisAddr, err)
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := client.Do(ctx, client.B().Ping().Build()).Error(); err != nil {
+		b.Skipf("Redis not available at %s: %v", redisAddr, err)
+		client.Close()
+		return nil, nil
+	}
+
+	client.Do(ctx, client.B().Flushdb().Build())
 
 	return client, func() {
 		client.Close()
@@ -98,7 +152,7 @@ func runBenchmark(b *testing.B, name string, op func(b *testing.B, client *redis
 	})
 }
 
-func BenchmarkCommands(b *testing.B) {
+func BenchmarkGoRedisCommands(b *testing.B) {
 	ctx := context.Background()
 
 	// 1. SET
