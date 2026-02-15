@@ -9,13 +9,13 @@ func TestStringOperations(t *testing.T) {
 
 	// Test GetSet
 	db.Set("key1", "val1", 0)
-	oldVal, ok := db.GetSet("key1", "val2")
+	oldVal, ok, _ := db.GetSet("key1", "val2")
 	if !ok || oldVal != "val1" {
 		t.Errorf("GetSet failed, expected val1, got %v", oldVal)
 	}
-	newVal, _ := db.Get("key1")
-	if newVal != "val2" {
-		t.Errorf("GetSet failed to set new value, expected val2, got %v", newVal)
+	newItem, _ := db.Get("key1")
+	if newItem.Str != "val2" {
+		t.Errorf("GetSet failed to set new value, expected val2, got %v", newItem.Str)
 	}
 
 	// Test MSet and MGet
@@ -23,12 +23,12 @@ func TestStringOperations(t *testing.T) {
 		"mkey1": "mval1",
 		"mkey2": "mval2",
 	})
-	vals := db.MGet("mkey1", "mkey2", "missing")
-	if len(vals) != 3 {
+	items := db.MGet("mkey1", "mkey2", "missing")
+	if len(items) != 3 {
 		t.Errorf("MGet returned wrong number of values")
 	}
-	if vals[0] != "mval1" || vals[1] != "mval2" || vals[2] != nil {
-		t.Errorf("MGet returned incorrect values: %v", vals)
+	if items[0].Str != "mval1" || items[1].Str != "mval2" || items[2] != nil {
+		t.Errorf("MGet returned incorrect values")
 	}
 }
 
@@ -86,8 +86,8 @@ func TestAppendStrLen(t *testing.T) {
 	}
 
 	val, _ := db.Get("strKey")
-	if val != "Hello World" {
-		t.Errorf("Expected 'Hello World', got '%v'", val)
+	if val.Str != "Hello World" {
+		t.Errorf("Expected 'Hello World', got '%v'", val.Str)
 	}
 
 	// Test StrLen
@@ -121,15 +121,15 @@ func TestParallelIncr(t *testing.T) {
 		<-done
 	}
 
-	val, ok := db.Get(key)
-	if !ok {
+	val, err := db.Get(key)
+	if err != nil {
 		t.Errorf("Counter key missing")
 	}
 
 	// Since we are storing int64 in Incr, we need to cast correctly or toInt64 helper
-	intVal, err := toInt64(val)
+	intVal, err := toInt64(val.Str)
 	if err != nil {
-		t.Errorf("Failed to cast value: %v", val)
+		t.Errorf("Failed to cast value: %v", val.Str)
 	}
 
 	if intVal != int64(count) {

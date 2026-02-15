@@ -121,27 +121,27 @@ func (d *DistributedMap) HSet(key string, field string, value any) (int, error) 
 }
 
 // HGet returns the value associated with field in the hash stored at key.
-func (d *DistributedMap) HGet(key string, field string) (any, error) {
+func (d *DistributedMap) HGet(key string, field string) (string, bool, error) {
 	item, err := d.getHashItem(key)
 	if err != nil {
-		return nil, err // ErrWrongType
+		return "", false, err // ErrWrongType
 	}
 	if item == nil {
-		return nil, nil
+		return "", false, nil
 	}
 
 	item.Mu.RLock()
 	defer item.Mu.RUnlock()
 
 	if item.Hash == nil {
-		return nil, nil // Should not happen for valid TypeHash
+		return "", false, nil // Should not happen for valid TypeHash
 	}
 
 	val, ok := item.Hash[field]
 	if !ok {
-		return nil, nil
+		return "", false, nil
 	}
-	return val, nil
+	return val, true, nil
 }
 
 // HDel removes the specified fields from the hash stored at key.
@@ -261,20 +261,20 @@ func (d *DistributedMap) HMGet(key string, fields ...string) ([]any, error) {
 }
 
 // HGetAll returns all fields and values of the hash.
-func (d *DistributedMap) HGetAll(key string) (map[string]any, error) {
+func (d *DistributedMap) HGetAll(key string) (map[string]string, error) {
 	item, err := d.getHashItem(key)
 	if err != nil {
 		return nil, err
 	}
 	if item == nil {
-		return make(map[string]any), nil
+		return make(map[string]string), nil
 	}
 
 	item.Mu.RLock()
 	defer item.Mu.RUnlock()
 
 	// Copy to match snapshot isolation semantic
-	result := make(map[string]any, len(item.Hash))
+	result := make(map[string]string, len(item.Hash))
 	for k, v := range item.Hash {
 		result[k] = v
 	}
@@ -302,19 +302,19 @@ func (d *DistributedMap) HKeys(key string) ([]string, error) {
 }
 
 // HVals returns all values in the hash.
-func (d *DistributedMap) HVals(key string) ([]any, error) {
+func (d *DistributedMap) HVals(key string) ([]string, error) {
 	item, err := d.getHashItem(key)
 	if err != nil {
 		return nil, err
 	}
 	if item == nil {
-		return []any{}, nil
+		return []string{}, nil
 	}
 
 	item.Mu.RLock()
 	defer item.Mu.RUnlock()
 
-	vals := make([]any, 0, len(item.Hash))
+	vals := make([]string, 0, len(item.Hash))
 	for _, v := range item.Hash {
 		vals = append(vals, v)
 	}

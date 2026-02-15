@@ -329,49 +329,25 @@ func (d *DistributedMap) Set(key string, value any, duration time.Duration) {
 	d.NotifyObservers(key)
 }
 
-func (d *DistributedMap) Get(key string) (any, bool) {
+// Get returns the raw *Item for the given key.
+// Caller MUST Lock/RLock item.Mu before accessing fields.
+func (d *DistributedMap) Get(key string) (*Item, error) {
 	shard := d.getShard(key)
 	val, ok := shard.Load(key)
 	if !ok {
-		return nil, false
+		return nil, ErrNoSuchKey
 	}
 
-	item := val.(*Item) // Now it's *Item
+	item := val.(*Item)
 	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
 		shard.Delete(key)
 		d.NotifyObservers(key)
 		// item.reset()
 		// itemPool.Put(item)
-		return nil, false
+		return nil, ErrNoSuchKey
 	}
 
-	// Return concrete value based on type? Or return Item?
-	// Original returned interface{}.
-	switch item.Type {
-	case TypeString:
-		return item.Str, true
-	case TypeList:
-		// Convert to []string
-		res := make([]string, 0, item.ListSize)
-		curr := item.ListHead
-		for curr != nil {
-			res = append(res, curr.Value)
-			curr = curr.Next
-		}
-		return res, true
-	case TypeHash:
-		return item.Hash, true
-	case TypeSet:
-		return item.Set, true
-	case TypeZSet:
-		return item.ZSet, true
-	case TypeBitmap:
-		return item.Bitmap, true
-	case TypeStream:
-		return item.Stream, true
-	default:
-		return nil, true
-	}
+	return item, nil
 }
 
 func (d *DistributedMap) Del(key string) {

@@ -2,7 +2,6 @@ package ledis
 
 import (
 	"errors"
-	"fmt"
 	"strconv"
 	"time"
 )
@@ -13,86 +12,48 @@ var (
 )
 
 // GetSet sets the given key to value and returns the old value.
-func (d *DistributedMap) GetSet(key string, value any) (any, bool) {
-	// Value must be string for now, or we convert
-	strVal := ""
-	switch v := value.(type) {
-	case string:
-		strVal = v
-	default:
-		strVal = fmt.Sprintf("%v", v)
-	}
-
+// GetSet sets the given key to value and returns the old value.
+func (d *DistributedMap) GetSet(key string, value string) (string, bool, error) {
 	shard := d.getShard(key)
 
 	newItem := itemPool.Get().(*Item)
 	newItem.reset()
 	newItem.Type = TypeString
-	newItem.Str = strVal
+	newItem.Str = value
 	newItem.ExpiresAt = 0
-
-	// Swap
-	// Use LoadOrStore? No, we want to replace always.
-	// Map.Swap is available in go 1.20+? Or standard sync.Map has Swap?
-	// sync.Map has Swap since Go 1.20. User environment?
-	// If not, we use Store, but we need old value to return AND to free.
-	// If we use Store, we can't atomically get Ref to old to free it safely if concurrents are accessing?
-	// Actually, Store returns nothing.
-	// But `Load` then `Store` is not atomic.
-	// Wait, `Swap` IS atomic and returns previous value.
-	// Let's assume Go 1.20+ (safe assumption for modern dev).
-	// If compilation fails, I'll fix.
 
 	previous, loaded := shard.Swap(key, newItem)
 
 	if loaded {
 		prevItem := previous.(*Item)
-		// We return the value... but we also need to free the Item struct?
-		// We can't free it if we return a reference to its field (like &prevItem.Str).
-		// But we return `interface{}` which is `prevItem.Str` (copy of string header, and string data is on heap).
-		// So it is safe to return `prevItem.Str` and then `Put(prevItem)`.
-		// BE CAREFUL: string data is immutable.
-		// What if return type was map/slice? Copying map/slice header is fine, but backing array is shared.
-		// If we recycle `prevItem`, we reset it. `prevItem.List = nil`.
-		// If the user of `GetSet` (the caller) holds the slice `prevItem.List`, and we `reset` -> `List=nil`,
-		// that's fine, the caller has their own slice header pointing to backing array.
-		// `reset` only clears the struct fields.
-		// So it is SAFE.
-
-		val := prevItem.Str
-		if prevItem.Type != TypeString {
-			// Handle mismatch? Redis returns error or converts?
-			// GETSET usually for strings.
-			// Just return whatever it was?
-			// Verify if it was string?
-			// If not string, maybe return nil/error?
-			// For now return val if type match, else we might have issue.
-			// But we are overwriting anyway.
-			// We'll return based on type.
+		val := ""
+		if prevItem.Type == TypeString {
+			val = prevItem.Str
 		}
 
-		// If expired?
+		// check expiry? If expired, we treat as not loaded/new?
+		// But Swap already happened. We just return empty string and false?
+		// Or false means "no previous value".
+		// Redis GETSET returns nil if key didn't exist.
+		// If key existed but expired, we should return nil (false).
 		if prevItem.ExpiresAt > 0 && prevItem.ExpiresAt < time.Now().UnixNano() {
-			val = "" // Expired
+			// It was expired.
 			loaded = false
-		} else {
-			// Extract value
-			switch prevItem.Type {
-			case TypeString:
-				val = prevItem.Str
-			default:
-				// Return string repr?
-				val = "" // or handle conversion
-			}
+			val = ""
 		}
 
-		// prevItem.reset()
-		// itemPool.Put(prevItem)
-		return val, loaded
+		// We can't easily recycle prevItem safely here if we don't know if others are using it.
+		// Current design assumes Swap makes us owner?
+		// Yes, if we are the only one removing it from map.
+		// But readers might still hold pointer.
+		// So we rely on GC or ref counting (which we don't have).
+		// We'll let GC handle it.
+
+		return val, loaded, nil
 	}
 
 	d.NotifyObservers(key)
-	return nil, false
+	return "", false, nil
 }
 
 // MSet sets multiple keys to multiple values.
@@ -103,12 +64,14 @@ func (d *DistributedMap) MSet(pairs map[string]any) {
 }
 
 // MGet returns the values of all specified keys.
-func (d *DistributedMap) MGet(keys ...string) []any {
-	values := make([]any, len(keys))
+// MGet returns the values of all specified keys.
+// Caller MUST Lock/RLock each item.Mu before accessing fields.
+func (d *DistributedMap) MGet(keys ...string) []*Item {
+	values := make([]*Item, len(keys))
 	for i, key := range keys {
-		val, ok := d.Get(key)
-		if ok {
-			values[i] = val
+		item, err := d.Get(key)
+		if err == nil {
+			values[i] = item
 		} else {
 			values[i] = nil
 		}

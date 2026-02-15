@@ -24,7 +24,7 @@ func TestListBasics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LRange failed: %v", err)
 	}
-	expected := []any{"c", "b", "a"}
+	expected := []string{"c", "b", "a"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("LPush order wrong. Expected %v, got %v", expected, vals)
 	}
@@ -40,7 +40,7 @@ func TestListBasics(t *testing.T) {
 	}
 
 	vals, _ = db.LRange(key, 0, -1)
-	expected = []any{"c", "b", "a", "1", "2"}
+	expected = []string{"c", "b", "a", "1", "2"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("RPush order wrong. Expected %v, got %v", expected, vals)
 	}
@@ -55,18 +55,24 @@ func TestListBasics(t *testing.T) {
 	}
 
 	// Test LPop
-	val, err := db.LPop(key)
+	val, ok, err := db.LPop(key)
 	if err != nil {
 		t.Fatalf("LPop failed: %v", err)
+	}
+	if !ok {
+		t.Fatalf("LPop returned false")
 	}
 	if val != "c" {
 		t.Errorf("Expected 'c', got %v", val)
 	}
 
 	// Test RPop
-	val, err = db.RPop(key)
+	val, ok, err = db.RPop(key)
 	if err != nil {
 		t.Fatalf("RPop failed: %v", err)
+	}
+	if !ok {
+		t.Fatalf("RPop returned false")
 	}
 	if val != "2" {
 		t.Errorf("Expected '2', got %v", val)
@@ -74,7 +80,7 @@ func TestListBasics(t *testing.T) {
 
 	// Remaining: [b, a, 1]
 	vals, _ = db.LRange(key, 0, -1)
-	expected = []any{"b", "a", "1"}
+	expected = []string{"b", "a", "1"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("List state wrong after pops. Expected %v, got %v", expected, vals)
 	}
@@ -129,7 +135,7 @@ func TestListManipulation(t *testing.T) {
 		t.Errorf("LTrim failed: %v", err)
 	}
 	vals, _ := db.LRange(key, 0, -1)
-	expected := []any{"2", "three", "four"}
+	expected := []string{"2", "three", "four"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("LTrim result wrong. Expected %v, got %v", expected, vals)
 	}
@@ -153,7 +159,7 @@ func TestLRem(t *testing.T) {
 
 	// Expected: [b, c, a, d]
 	vals, _ := db.LRange(key, 0, -1)
-	expected := []any{"b", "c", "a", "d"}
+	expected := []string{"b", "c", "a", "d"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("LRem(2, a) result wrong. Expected %v, got %v", expected, vals)
 	}
@@ -166,7 +172,7 @@ func TestLRem(t *testing.T) {
 	db.LRem(key, -2, "a")
 	// Expected: [a, b, c, d]
 	vals, _ = db.LRange(key, 0, -1)
-	expected = []any{"a", "b", "c", "d"}
+	expected = []string{"a", "b", "c", "d"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("LRem(-2, a) result wrong. Expected %v, got %v", expected, vals)
 	}
@@ -176,7 +182,7 @@ func TestLRem(t *testing.T) {
 	// Remove all 'a'
 	db.LRem(key, 0, "a")
 	vals, _ = db.LRange(key, 0, -1)
-	expected = []any{"b"}
+	expected = []string{"b"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("LRem(0, a) result wrong. Expected %v, got %v", expected, vals)
 	}

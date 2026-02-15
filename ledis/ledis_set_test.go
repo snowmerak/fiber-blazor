@@ -58,14 +58,10 @@ func TestSetBasics(t *testing.T) {
 		t.Fatalf("SMembers failed: %v", err)
 	}
 	// Sort to compare
-	strMembers := make([]string, len(members))
-	for i, m := range members {
-		strMembers[i] = m.(string)
-	}
-	sort.Strings(strMembers)
+	sort.Strings(members)
 	expected := []string{"a", "b", "c"}
-	if !reflect.DeepEqual(strMembers, expected) {
-		t.Errorf("SMembers wrong. Expected %v, got %v", expected, strMembers)
+	if !reflect.DeepEqual(members, expected) {
+		t.Errorf("SMembers wrong. Expected %v, got %v", expected, members)
 	}
 
 	// Test SRem
@@ -98,11 +94,10 @@ func TestSetOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SInter failed: %v", err)
 	}
-	strInter := toStringSlice(inter)
-	sort.Strings(strInter)
+	sort.Strings(inter)
 	expectedInter := []string{"b", "c"}
-	if !reflect.DeepEqual(strInter, expectedInter) {
-		t.Errorf("SInter wrong. Expected %v, got %v", expectedInter, strInter)
+	if !reflect.DeepEqual(inter, expectedInter) {
+		t.Errorf("SInter wrong. Expected %v, got %v", expectedInter, inter)
 	}
 
 	// Test SUnion
@@ -110,11 +105,10 @@ func TestSetOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SUnion failed: %v", err)
 	}
-	strUnion := toStringSlice(union)
-	sort.Strings(strUnion)
+	sort.Strings(union)
 	expectedUnion := []string{"a", "b", "c", "d"}
-	if !reflect.DeepEqual(strUnion, expectedUnion) {
-		t.Errorf("SUnion wrong. Expected %v, got %v", expectedUnion, strUnion)
+	if !reflect.DeepEqual(union, expectedUnion) {
+		t.Errorf("SUnion wrong. Expected %v, got %v", expectedUnion, union)
 	}
 
 	// Test SDiff (set1 - set2) -> {a}
@@ -122,10 +116,9 @@ func TestSetOperations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SDiff failed: %v", err)
 	}
-	strDiff := toStringSlice(diff)
 	// Should be just "a"
-	if len(strDiff) != 1 || strDiff[0] != "a" {
-		t.Errorf("SDiff wrong. Expected [a], got %v", strDiff)
+	if len(diff) != 1 || diff[0] != "a" {
+		t.Errorf("SDiff wrong. Expected [a], got %v", diff)
 	}
 }
 
@@ -164,12 +157,12 @@ func TestSPop(t *testing.T) {
 	key := "spop_set"
 	db.SAdd(key, "one", "two", "three")
 
-	val, err := db.SPop(key)
+	val, ok, err := db.SPop(key)
 	if err != nil {
 		t.Fatalf("SPop failed: %v", err)
 	}
-	if val == nil {
-		t.Errorf("Expected value, got nil")
+	if !ok {
+		t.Errorf("Expected value, got nil (ok=false)")
 	}
 
 	// Should be removed
@@ -182,12 +175,4 @@ func TestSPop(t *testing.T) {
 	if card != 2 {
 		t.Errorf("Expected card 2, got %d", card)
 	}
-}
-
-func toStringSlice(interfaces []any) []string {
-	strs := make([]string, len(interfaces))
-	for i, v := range interfaces {
-		strs[i] = v.(string)
-	}
-	return strs
 }

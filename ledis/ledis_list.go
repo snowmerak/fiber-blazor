@@ -232,18 +232,18 @@ func (d *DistributedMap) RPush(key string, values ...any) (int, error) {
 	return item.rpush(strValues...), nil
 }
 
-func (d *DistributedMap) LPop(key string) (any, error) {
+func (d *DistributedMap) LPop(key string) (string, bool, error) {
 	item, err := d.getListItem(key)
 	if err != nil {
-		return nil, err
+		return "", false, err
 	}
 	if item == nil {
-		return nil, nil
+		return "", false, nil
 	}
 
 	val, ok := item.pop(true)
 	if !ok {
-		return nil, nil
+		return "", false, nil
 	}
 
 	// Check if empty after pop
@@ -254,20 +254,20 @@ func (d *DistributedMap) LPop(key string) (any, error) {
 	if isEmpty {
 		d.Del(key)
 	}
-	return val, nil
+	return val, true, nil
 }
 
-func (d *DistributedMap) RPop(key string) (any, error) {
+func (d *DistributedMap) RPop(key string) (string, bool, error) {
 	item, err := d.getListItem(key)
 	if err != nil {
-		return nil, err
+		return "", false, err
 	}
 	if item == nil {
-		return nil, nil
+		return "", false, nil
 	}
 	val, ok := item.pop(false)
 	if !ok {
-		return nil, nil
+		return "", false, nil
 	}
 
 	item.Mu.RLock()
@@ -277,30 +277,31 @@ func (d *DistributedMap) RPop(key string) (any, error) {
 	if isEmpty {
 		d.Del(key)
 	}
-	return val, nil
+	return val, true, nil
 }
 
-func (d *DistributedMap) blockPop(key string, timeout time.Duration, left bool) (any, error) {
-	var val any
+func (d *DistributedMap) blockPop(key string, timeout time.Duration, left bool) (string, error) {
+	var val string
 	var err error
+	var ok bool
 
 	if left {
-		val, err = d.LPop(key)
+		val, ok, err = d.LPop(key)
 	} else {
-		val, err = d.RPop(key)
+		val, ok, err = d.RPop(key)
 	}
 
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	if val != nil {
+	if ok {
 		return val, nil
 	}
 
 	// Register waiter
 	item, err := d.getOrCreateListItem(key)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
 	ch := make(chan string, 1)
@@ -309,9 +310,21 @@ func (d *DistributedMap) blockPop(key string, timeout time.Duration, left bool) 
 	if item.ListSize > 0 {
 		item.Mu.Unlock()
 		if left {
-			return d.LPop(key)
+			v, ok, err := d.LPop(key)
+			if err != nil {
+				return "", err
+			}
+			if ok {
+				return v, nil
+			}
 		} else {
-			return d.RPop(key)
+			v, ok, err := d.RPop(key)
+			if err != nil {
+				return "", err
+			}
+			if ok {
+				return v, nil
+			}
 		}
 	}
 	item.Waiters = append(item.Waiters, ch)
@@ -330,15 +343,15 @@ func (d *DistributedMap) blockPop(key string, timeout time.Duration, left bool) 
 				break
 			}
 		}
-		return nil, ErrTimeout
+		return "", ErrTimeout
 	}
 }
 
-func (d *DistributedMap) BLPop(key string, timeout time.Duration) (any, error) {
+func (d *DistributedMap) BLPop(key string, timeout time.Duration) (string, error) {
 	return d.blockPop(key, timeout, true)
 }
 
-func (d *DistributedMap) BRPop(key string, timeout time.Duration) (any, error) {
+func (d *DistributedMap) BRPop(key string, timeout time.Duration) (string, error) {
 	return d.blockPop(key, timeout, false)
 }
 
@@ -373,13 +386,13 @@ func (d *DistributedMap) LLen(key string) (int, error) {
 	return item.ListSize, nil
 }
 
-func (d *DistributedMap) LRange(key string, start, stop int) ([]any, error) {
+func (d *DistributedMap) LRange(key string, start, stop int) ([]string, error) {
 	item, err := d.getListItem(key)
 	if err != nil {
 		return nil, err
 	}
 	if item == nil {
-		return []any{}, nil
+		return []string{}, nil
 	}
 
 	item.Mu.RLock()
@@ -387,7 +400,7 @@ func (d *DistributedMap) LRange(key string, start, stop int) ([]any, error) {
 
 	size := item.ListSize
 	if size == 0 {
-		return []any{}, nil
+		return []string{}, nil
 	}
 
 	if start < 0 {
@@ -400,10 +413,10 @@ func (d *DistributedMap) LRange(key string, start, stop int) ([]any, error) {
 		stop = size - 1
 	}
 	if start > stop {
-		return []any{}, nil
+		return []string{}, nil
 	}
 
-	result := make([]any, 0, stop-start+1)
+	result := make([]string, 0, stop-start+1)
 
 	curr := item.ListHead
 	for i := 0; i < start; i++ {

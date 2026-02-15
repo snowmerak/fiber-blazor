@@ -1,6 +1,7 @@
 package ledis
 
 import (
+	"fmt"
 	maps0 "maps"
 	"math/rand"
 	"time"
@@ -438,21 +439,21 @@ func (d *DistributedMap) ZIncrBy(key string, increment float64, member string) (
 	return score, nil
 }
 
-func (d *DistributedMap) ZRange(key string, start, stop int64, withScores bool) ([]any, error) {
+func (d *DistributedMap) ZRange(key string, start, stop int64, withScores bool) ([]string, error) {
 	return d.zrangeGeneric(key, start, stop, withScores, false)
 }
 
-func (d *DistributedMap) ZRevRange(key string, start, stop int64, withScores bool) ([]any, error) {
+func (d *DistributedMap) ZRevRange(key string, start, stop int64, withScores bool) ([]string, error) {
 	return d.zrangeGeneric(key, start, stop, withScores, true)
 }
 
-func (d *DistributedMap) zrangeGeneric(key string, start, stop int64, withScores, reverse bool) ([]any, error) {
+func (d *DistributedMap) zrangeGeneric(key string, start, stop int64, withScores, reverse bool) ([]string, error) {
 	item, err := d.getZSetItem(key)
 	if err != nil {
 		return nil, err
 	}
 	if item == nil {
-		return []any{}, nil
+		return []string{}, nil
 	}
 
 	item.Mu.RLock()
@@ -460,7 +461,7 @@ func (d *DistributedMap) zrangeGeneric(key string, start, stop int64, withScores
 
 	z := item.ZSet
 	if z == nil {
-		return []any{}, nil
+		return []string{}, nil
 	}
 
 	length := z.zsl.length
@@ -474,11 +475,14 @@ func (d *DistributedMap) zrangeGeneric(key string, start, stop int64, withScores
 		stop = length - 1
 	}
 	if start > stop {
-		return []any{}, nil
+		return []string{}, nil
 	}
 
 	rangeLen := stop - start + 1
-	result := make([]any, 0, rangeLen)
+	if withScores {
+		rangeLen *= 2
+	}
+	result := make([]string, 0, rangeLen)
 
 	var x *zskiplistNode
 	if reverse {
@@ -492,7 +496,7 @@ func (d *DistributedMap) zrangeGeneric(key string, start, stop int64, withScores
 			break
 		}
 		if withScores {
-			result = append(result, x.member, x.score)
+			result = append(result, x.member, fmt.Sprintf("%g", x.score))
 		} else {
 			result = append(result, x.member)
 		}

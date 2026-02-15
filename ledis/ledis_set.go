@@ -1,7 +1,6 @@
 package ledis
 
 import (
-	"fmt"
 	"math/rand"
 	"time"
 )
@@ -77,7 +76,7 @@ func (d *DistributedMap) getOrCreateSetItem(key string) (*Item, error) {
 }
 
 // SAdd adds the specified members to the set stored at key.
-func (d *DistributedMap) SAdd(key string, members ...any) (int, error) {
+func (d *DistributedMap) SAdd(key string, members ...string) (int, error) {
 	item, err := d.getOrCreateSetItem(key)
 	if err != nil {
 		return 0, err
@@ -92,16 +91,8 @@ func (d *DistributedMap) SAdd(key string, members ...any) (int, error) {
 
 	added := 0
 	for _, m := range members {
-		strVal := ""
-		switch v := m.(type) {
-		case string:
-			strVal = v
-		default:
-			strVal = fmt.Sprintf("%v", v)
-		}
-
-		if _, exists := item.Set[strVal]; !exists {
-			item.Set[strVal] = struct{}{}
+		if _, exists := item.Set[m]; !exists {
+			item.Set[m] = struct{}{}
 			added++
 		}
 	}
@@ -109,7 +100,7 @@ func (d *DistributedMap) SAdd(key string, members ...any) (int, error) {
 }
 
 // SRem removes the specified members from the set stored at key.
-func (d *DistributedMap) SRem(key string, members ...any) (int, error) {
+func (d *DistributedMap) SRem(key string, members ...string) (int, error) {
 	item, err := d.getSetItem(key)
 	if err != nil {
 		return 0, err
@@ -119,19 +110,10 @@ func (d *DistributedMap) SRem(key string, members ...any) (int, error) {
 	}
 
 	item.Mu.Lock()
-
 	removed := 0
 	for _, m := range members {
-		strVal := ""
-		switch v := m.(type) {
-		case string:
-			strVal = v
-		default:
-			strVal = fmt.Sprintf("%v", v)
-		}
-
-		if _, exists := item.Set[strVal]; exists {
-			delete(item.Set, strVal)
+		if _, exists := item.Set[m]; exists {
+			delete(item.Set, m)
 			removed++
 		}
 	}
@@ -147,15 +129,7 @@ func (d *DistributedMap) SRem(key string, members ...any) (int, error) {
 }
 
 // SIsMember returns if member is a member of the set stored at key.
-func (d *DistributedMap) SIsMember(key string, member any) (bool, error) {
-	strVal := ""
-	switch v := member.(type) {
-	case string:
-		strVal = v
-	default:
-		strVal = fmt.Sprintf("%v", v)
-	}
-
+func (d *DistributedMap) SIsMember(key string, member string) (bool, error) {
 	item, err := d.getSetItem(key)
 	if err != nil {
 		return false, err
@@ -167,7 +141,7 @@ func (d *DistributedMap) SIsMember(key string, member any) (bool, error) {
 	item.Mu.RLock()
 	defer item.Mu.RUnlock()
 
-	_, exists := item.Set[strVal]
+	_, exists := item.Set[member]
 	return exists, nil
 }
 
@@ -188,19 +162,19 @@ func (d *DistributedMap) SCard(key string) (int, error) {
 }
 
 // SMembers returns all the members of the set value stored at key.
-func (d *DistributedMap) SMembers(key string) ([]any, error) {
+func (d *DistributedMap) SMembers(key string) ([]string, error) {
 	item, err := d.getSetItem(key)
 	if err != nil {
 		return nil, err
 	}
 	if item == nil {
-		return []any{}, nil
+		return []string{}, nil
 	}
 
 	item.Mu.RLock()
 	defer item.Mu.RUnlock()
 
-	members := make([]any, 0, len(item.Set))
+	members := make([]string, 0, len(item.Set))
 	for m := range item.Set {
 		members = append(members, m)
 	}
@@ -208,7 +182,7 @@ func (d *DistributedMap) SMembers(key string) ([]any, error) {
 }
 
 // SMove moves member from the set at source to the set at destination.
-func (d *DistributedMap) SMove(source, destination string, member any) (bool, error) {
+func (d *DistributedMap) SMove(source, destination string, member string) (bool, error) {
 	exists, err := d.SIsMember(source, member)
 	if err != nil {
 		return false, err
@@ -235,13 +209,13 @@ func (d *DistributedMap) SMove(source, destination string, member any) (bool, er
 }
 
 // SPop removes and returns a random member from the set value stored at key.
-func (d *DistributedMap) SPop(key string) (any, error) {
+func (d *DistributedMap) SPop(key string) (string, bool, error) {
 	item, err := d.getSetItem(key)
 	if err != nil {
-		return nil, err
+		return "", false, err
 	}
 	if item == nil {
-		return nil, nil
+		return "", false, nil
 	}
 
 	item.Mu.Lock()
@@ -250,6 +224,13 @@ func (d *DistributedMap) SPop(key string) (any, error) {
 	for m := range item.Set {
 		member = m
 		break // Pick first one (random-ish)
+	}
+
+	// This assumes the loop ran at least once. If set explicitely empty but item exists?
+	if member == "" && len(item.Set) == 0 {
+		item.Mu.Unlock() // empty set item?
+		d.Del(key)
+		return "", false, nil
 	}
 
 	delete(item.Set, member)
@@ -261,11 +242,11 @@ func (d *DistributedMap) SPop(key string) (any, error) {
 		d.Del(key)
 	}
 
-	return member, nil
+	return member, true, nil
 }
 
 // SRandMember returns a random member from the set value stored at key.
-func (d *DistributedMap) SRandMember(key string, count int) ([]any, error) {
+func (d *DistributedMap) SRandMember(key string, count int) ([]string, error) {
 	item, err := d.getSetItem(key)
 	if err != nil {
 		return nil, err
@@ -282,10 +263,10 @@ func (d *DistributedMap) SRandMember(key string, count int) ([]any, error) {
 	}
 
 	if count == 0 {
-		return []any{}, nil
+		return []string{}, nil
 	}
 
-	result := make([]any, 0)
+	result := make([]string, 0)
 
 	if count > 0 {
 		if count >= len(item.Set) {
@@ -322,9 +303,9 @@ func (d *DistributedMap) SRandMember(key string, count int) ([]any, error) {
 // Set Operations: SDiff, SInter, SUnion
 
 // SDiff returns the members of the set resulting from the difference between the first set and all the successive sets.
-func (d *DistributedMap) SDiff(keys ...string) ([]any, error) {
+func (d *DistributedMap) SDiff(keys ...string) ([]string, error) {
 	if len(keys) == 0 {
-		return []any{}, nil
+		return []string{}, nil
 	}
 
 	// Fetch all sets
@@ -338,7 +319,7 @@ func (d *DistributedMap) SDiff(keys ...string) ([]any, error) {
 	}
 
 	if sets[0] == nil {
-		return []any{}, nil
+		return []string{}, nil
 	}
 
 	base := make(map[string]struct{})
@@ -360,7 +341,7 @@ func (d *DistributedMap) SDiff(keys ...string) ([]any, error) {
 		s.Mu.RUnlock()
 	}
 
-	result := make([]any, 0, len(base))
+	result := make([]string, 0, len(base))
 	for m := range base {
 		result = append(result, m)
 	}
@@ -381,9 +362,9 @@ func (d *DistributedMap) SDiffStore(destination string, keys ...string) (int, er
 	return 0, nil
 }
 
-func (d *DistributedMap) SInter(keys ...string) ([]any, error) {
+func (d *DistributedMap) SInter(keys ...string) ([]string, error) {
 	if len(keys) == 0 {
-		return []any{}, nil
+		return []string{}, nil
 	}
 
 	// Fetch all
@@ -395,7 +376,7 @@ func (d *DistributedMap) SInter(keys ...string) ([]any, error) {
 		}
 		sets[i] = s
 		if s == nil {
-			return []any{}, nil
+			return []string{}, nil
 		}
 	}
 
@@ -422,7 +403,7 @@ func (d *DistributedMap) SInter(keys ...string) ([]any, error) {
 		}
 	}
 
-	result := make([]any, 0, len(base))
+	result := make([]string, 0, len(base))
 	for m := range base {
 		result = append(result, m)
 	}
@@ -441,9 +422,9 @@ func (d *DistributedMap) SInterStore(destination string, keys ...string) (int, e
 	return 0, nil
 }
 
-func (d *DistributedMap) SUnion(keys ...string) ([]any, error) {
+func (d *DistributedMap) SUnion(keys ...string) ([]string, error) {
 	if len(keys) == 0 {
-		return []any{}, nil
+		return []string{}, nil
 	}
 
 	base := make(map[string]struct{})
@@ -463,7 +444,7 @@ func (d *DistributedMap) SUnion(keys ...string) ([]any, error) {
 		s.Mu.RUnlock()
 	}
 
-	result := make([]any, 0, len(base))
+	result := make([]string, 0, len(base))
 	for m := range base {
 		result = append(result, m)
 	}

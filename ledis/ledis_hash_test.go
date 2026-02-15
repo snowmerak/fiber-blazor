@@ -30,17 +30,20 @@ func TestHashOperations(t *testing.T) {
 	}
 
 	// Test HGet
-	val, err := db.HGet(key, "field1")
+	val, ok, err := db.HGet(key, "field1")
 	if err != nil {
 		t.Fatalf("HGet failed: %v", err)
+	}
+	if !ok {
+		t.Fatalf("Expected field1 to exist")
 	}
 	if val != "World" {
 		t.Errorf("Expected 'World', got %v", val)
 	}
 
-	val, err = db.HGet(key, "missing")
-	if val != nil {
-		t.Errorf("Expected nil for missing field, got %v", val)
+	val, ok, err = db.HGet(key, "missing")
+	if ok {
+		t.Errorf("Expected ok=false for missing field, got %v", val)
 	}
 
 	// Test HExists

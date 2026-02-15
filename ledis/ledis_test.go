@@ -12,12 +12,12 @@ func TestBasicOperations(t *testing.T) {
 
 	// Test Set and Get
 	db.Set("key1", "value1", 0)
-	val, ok := db.Get("key1")
-	if !ok {
-		t.Errorf("Expected key1 to exist")
+	val, err := db.Get("key1")
+	if err != nil {
+		t.Errorf("Expected key1 to exist, got error: %v", err)
 	}
-	if val != "value1" {
-		t.Errorf("Expected value1, got %v", val)
+	if val.Str != "value1" {
+		t.Errorf("Expected value1, got %v", val.Str)
 	}
 
 	// Test Exists
@@ -30,8 +30,8 @@ func TestBasicOperations(t *testing.T) {
 	if db.Exists("key1") {
 		t.Errorf("Expected key1 to be deleted")
 	}
-	_, ok = db.Get("key1")
-	if ok {
+	_, err = db.Get("key1")
+	if err == nil {
 		t.Errorf("Expected key1 to be not found after deletion")
 	}
 }
@@ -50,8 +50,8 @@ func TestTTL(t *testing.T) {
 	if db.Exists("key_ttl") {
 		t.Errorf("Expected key_ttl to expire")
 	}
-	_, ok := db.Get("key_ttl")
-	if ok {
+	_, err := db.Get("key_ttl")
+	if err == nil {
 		t.Errorf("Expected key_ttl to be not found after expiry")
 	}
 }
@@ -83,12 +83,12 @@ func TestConcurrency(t *testing.T) {
 			defer wg.Done()
 			for j := range numOps {
 				key := fmt.Sprintf("key-%d-%d", id, j)
-				val, ok := db.Get(key)
-				if !ok {
+				val, err := db.Get(key)
+				if err != nil {
 					t.Errorf("Expected %s to exist", key)
 				}
-				if fmt.Sprintf("%v", val) != fmt.Sprintf("%d", j) {
-					t.Errorf("Expected %d, got %v", j, val)
+				if val.Str != fmt.Sprintf("%d", j) {
+					t.Errorf("Expected %d, got %v", j, val.Str)
 				}
 			}
 		}(i)

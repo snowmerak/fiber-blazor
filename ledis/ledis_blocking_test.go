@@ -32,7 +32,7 @@ func TestPushX(t *testing.T) {
 	}
 
 	vals, _ := db.LRange(key, 0, -1)
-	expected := []any{"b", "init"}
+	expected := []string{"b", "init"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("LPushX values wrong. Found %v", vals)
 	}
@@ -50,8 +50,8 @@ func TestBlockingPop(t *testing.T) {
 	if err != ErrTimeout {
 		t.Errorf("Expected ErrTimeout, got %v", err)
 	}
-	if val != nil {
-		t.Errorf("Expected nil value, got %v", val)
+	if val != "" {
+		t.Errorf("Expected empty string value, got %v", val)
 	}
 	if elapsed < 200*time.Millisecond {
 		t.Errorf("Blocking didn't wait long enough: %v", elapsed)

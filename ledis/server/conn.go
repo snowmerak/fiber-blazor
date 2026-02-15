@@ -534,15 +534,33 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		if c.tracking {
 			c.db.Track(args[0], c)
 		}
-		val, exists := c.db.Get(args[0])
-		if !exists {
+		item, err := c.db.Get(args[0])
+		if err != nil {
 			wr.WriteNull()
 			return
 		}
-		if s, ok := val.(string); ok {
-			wr.WriteBulkString(s)
+
+		item.Mu.RLock()
+		defer item.Mu.RUnlock()
+
+		if item.Type == ledis.TypeString {
+			wr.WriteBulkString(item.Str)
 		} else {
-			wr.WriteBulkString(fmt.Sprintf("%v", val))
+			// Redis returns WRONGTYPE for GET on non-string, but my previous impl converted.
+			// Let's stick to previous behavior: convert to string representation?
+			// The original code did: fmt.Sprintf("%v", val).
+			// But now we have *Item.
+			// If it's not string, maybe we should return error or specific representation.
+			// Redis strictness: GET only for string.
+			// Let's return WRONGTYPE for correctness if it is not string?
+			// But previously: "fmt.Sprintf" imply specific behavior.
+			// Let's replicate strict Redis behavior -> WRONGTYPE.
+			// Wait, previous `Get` implementation returned `any`.
+			// `conn.go` checked `if s, ok := val.(string)` else `fmt.Sprintf`.
+			// So it supported getting List as string representation?
+			// That is rarely useful. Redis returns WRONGTYPE.
+			// I will return WRONGTYPE.
+			wr.WriteError(ledis.ErrWrongType.Error())
 		}
 	case "MSET":
 		if len(args) == 0 || len(args)%2 != 0 {
@@ -560,20 +578,22 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			wr.WriteError("ERR wrong number of arguments for 'mget' command")
 			return
 		}
-		vals := c.db.MGet(args...)
-		wr.WriteArray(len(vals))
-		for i, v := range vals {
+		items := c.db.MGet(args...)
+		wr.WriteArray(len(items))
+		for i, item := range items {
 			if c.tracking {
 				c.db.Track(args[i], c)
 			}
-			if v == nil {
+			if item == nil {
 				wr.WriteNull()
 			} else {
-				if s, ok := v.(string); ok {
-					wr.WriteBulkString(s)
+				item.Mu.RLock()
+				if item.Type == ledis.TypeString {
+					wr.WriteBulkString(item.Str)
 				} else {
-					wr.WriteBulkString(fmt.Sprintf("%v", v))
+					wr.WriteNull() // MGET treats non-string as nil? Or WRONGTYPE? Redis MGET returns nil for non-string keys.
 				}
+				item.Mu.RUnlock()
 			}
 		}
 	case "INCR":
@@ -627,41 +647,27 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			wr.WriteError("ERR wrong number of arguments for 'lpop' command")
 			return
 		}
-		// LPOP is a write command, but it returns the value, so does it count as a read?
-		// In Redis, LPOP triggers invalidation for others, but does it register tracking?
-		// Actually, if tracking is ON, any command that returns data keys *could* be tracked,
-		// but typically only "ReadOnly" commands are tracked.
-		// However, in Redis 6+, even write commands returning data might not be tracked.
-		// Wait, LPOP invalidates the key.
-		// If I do LPOP k1, I get v1. Does it mean I'm watching k1?
-		// No, LPOP modifies k1.
-		// Only commands that don't modify the key generally register tracking.
-		// So we skip LPOP/RPOP.
 
-		val, err := c.db.LPop(args[0])
+		val, ok, err := c.db.LPop(args[0])
 		if err != nil {
 			wr.WriteNull()
+		} else if !ok {
+			wr.WriteNull()
 		} else {
-			if s, ok := val.(string); ok {
-				wr.WriteBulkString(s)
-			} else {
-				wr.WriteBulkString(fmt.Sprintf("%v", val))
-			}
+			wr.WriteBulkString(val)
 		}
 	case "RPOP":
 		if len(args) != 1 {
 			wr.WriteError("ERR wrong number of arguments for 'rpop' command")
 			return
 		}
-		val, err := c.db.RPop(args[0])
+		val, ok, err := c.db.RPop(args[0])
 		if err != nil {
 			wr.WriteNull()
+		} else if !ok {
+			wr.WriteNull()
 		} else {
-			if s, ok := val.(string); ok {
-				wr.WriteBulkString(s)
-			} else {
-				wr.WriteBulkString(fmt.Sprintf("%v", val))
-			}
+			wr.WriteBulkString(val)
 		}
 	case "LLEN":
 		if len(args) != 1 {
@@ -697,11 +703,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		} else {
 			wr.WriteArray(len(vals))
 			for _, v := range vals {
-				if s, ok := v.(string); ok {
-					wr.WriteBulkString(s)
-				} else {
-					wr.WriteBulkString(fmt.Sprintf("%v", v))
-				}
+				wr.WriteBulkString(v)
 			}
 		}
 
@@ -727,15 +729,13 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		if c.tracking {
 			c.db.Track(args[0], c)
 		}
-		val, err := c.db.HGet(args[0], args[1])
+		val, ok, err := c.db.HGet(args[0], args[1])
 		if err != nil {
 			wr.WriteNull()
+		} else if !ok {
+			wr.WriteNull()
 		} else {
-			if s, ok := val.(string); ok {
-				wr.WriteBulkString(s)
-			} else {
-				wr.WriteBulkString(fmt.Sprintf("%v", val))
-			}
+			wr.WriteBulkString(val)
 		}
 	case "HDEL":
 		if len(args) < 2 {
@@ -779,11 +779,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			wr.WriteArray(len(kv) * 2)
 			for k, v := range kv {
 				wr.WriteBulkString(k)
-				if s, ok := v.(string); ok {
-					wr.WriteBulkString(s)
-				} else {
-					wr.WriteBulkString(fmt.Sprintf("%v", v))
-				}
+				wr.WriteBulkString(v)
 			}
 		}
 
@@ -793,7 +789,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			wr.WriteError("ERR wrong number of arguments for 'sadd' command")
 			return
 		}
-		count, err := c.db.SAdd(args[0], stringToInterfaceSlice(args[1:])...)
+		count, err := c.db.SAdd(args[0], args[1:]...)
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
@@ -804,7 +800,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			wr.WriteError("ERR wrong number of arguments for 'srem' command")
 			return
 		}
-		count, err := c.db.SRem(args[0], stringToInterfaceSlice(args[1:])...)
+		count, err := c.db.SRem(args[0], args[1:]...)
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
@@ -824,11 +820,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		} else {
 			wr.WriteArray(len(members))
 			for _, m := range members {
-				if s, ok := m.(string); ok {
-					wr.WriteBulkString(s)
-				} else {
-					wr.WriteBulkString(fmt.Sprintf("%v", m))
-				}
+				wr.WriteBulkString(m)
 			}
 		}
 	case "SISMEMBER":
@@ -888,14 +880,8 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			wr.WriteArray(0)
 		} else {
 			wr.WriteArray(len(res))
-			for _, item := range res {
-				if s, ok := item.(string); ok {
-					wr.WriteBulkString(s)
-				} else if f, ok := item.(float64); ok {
-					wr.WriteBulkString(fmt.Sprintf("%g", f))
-				} else {
-					wr.WriteBulkString(fmt.Sprintf("%v", item))
-				}
+			for _, s := range res {
+				wr.WriteBulkString(s)
 			}
 		}
 

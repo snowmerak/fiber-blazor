@@ -84,28 +84,31 @@ func TestZRange(t *testing.T) {
 		t.Fatalf("ZRange failed: %v", err)
 	}
 
-	expected := []any{"a", "b", "c"}
+	expected := []string{"a", "b", "c"}
 	if !reflect.DeepEqual(res, expected) {
 		t.Errorf("ZRange 0 -1 wrong. Got %v", res)
 	}
 
 	// ZRANGE 0 1
 	res, err = db.ZRange(key, 0, 1, false)
-	expected = []any{"a", "b"}
+	expected = []string{"a", "b"}
 	if !reflect.DeepEqual(res, expected) {
 		t.Errorf("ZRange 0 1 wrong. Got %v", res)
 	}
 
 	// ZREVRANGE 0 -1 -> c, b, a
 	res, err = db.ZRevRange(key, 0, -1, false)
-	expected = []any{"c", "b", "a"}
+	if err != nil {
+		t.Fatalf("ZRevRange failed: %v", err)
+	}
+	expected = []string{"c", "b", "a"}
 	if !reflect.DeepEqual(res, expected) {
 		t.Errorf("ZRevRange 0 -1 wrong. Got %v", res)
 	}
 
 	// ZREVRANGE 0 0 -> c
 	res, err = db.ZRevRange(key, 0, 0, false)
-	expected = []any{"c"}
+	expected = []string{"c"}
 	if !reflect.DeepEqual(res, expected) {
 		t.Errorf("ZRevRange 0 0 wrong. Got %v", res)
 	}
@@ -153,7 +156,7 @@ func TestSkipListIntegrity(t *testing.T) {
 	}
 
 	// Check a few
-	if res[0] != "0" || res[1] != 0.0 {
+	if res[0] != "0" || res[1] != "0" {
 		t.Errorf("First element wrong: %v, %v", res[0], res[1])
 	}
 }
