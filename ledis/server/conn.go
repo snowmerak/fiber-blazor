@@ -65,6 +65,7 @@ func (c *Client) Invalidate(key string) {
 		c.writer.WriteBulkString("invalidate")
 		c.writer.WriteArray(1)
 		c.writer.WriteBulkString(key)
+		c.writer.Flush()
 	})
 }
 
@@ -125,6 +126,10 @@ func (h *Handler) Handle(conn net.Conn) {
 		}
 
 		client.execute(cmdName, args, client.writer, &client.mu)
+
+		client.mu.Lock()
+		client.writer.Flush()
+		client.mu.Unlock()
 	}
 }
 
@@ -132,6 +137,7 @@ func (c *Client) writeError(msg string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.writer.WriteError(msg)
+	c.writer.Flush()
 }
 
 func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
@@ -337,6 +343,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 
 					// Lock is NOT held here.
 					c.execute(q[0], q[1:], bufferedWriter, nil)
+					bufferedWriter.Flush()
 				}
 			})
 		}
@@ -352,6 +359,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 				return
 			}
 		}
+		c.writer.Flush()
 		return
 	}
 

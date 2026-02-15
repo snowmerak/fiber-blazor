@@ -14,6 +14,7 @@ const (
 	BulkString   = '$'
 	Array        = '*'
 	Push         = '>'
+	CRLF         = "\r\n"
 )
 
 type Value struct {
@@ -151,82 +152,143 @@ func (r *Reader) readSimpleString() (val Value, err error) {
 }
 
 type Writer struct {
-	writer io.Writer
+	writer *bufio.Writer
+	buf    []byte // scratch buffer for numbers
 }
 
 func NewWriter(w io.Writer) *Writer {
-	return &Writer{writer: w}
+	return &Writer{
+		writer: bufio.NewWriter(w),
+		buf:    make([]byte, 0, 64),
+	}
+}
+
+func (w *Writer) Flush() error {
+	return w.writer.Flush()
 }
 
 func (w *Writer) Write(v Value) error {
-	var bytes []byte
-
 	switch v.Type {
 	case Array:
-		bytes = append(bytes, Array)
-		bytes = append(bytes, strconv.Itoa(len(v.Array))...)
-		bytes = append(bytes, '\r', '\n')
+		if err := w.WriteArray(len(v.Array)); err != nil {
+			return err
+		}
 		for _, val := range v.Array {
-			// Recursive logic, simplified for expected command structure
-			// Actually need full recursion or separate write method
-			// Let's implement full recursion by calling Write?
-			// But Write takes Value.
-			// Helper needed or recursive call.
-
-			// Calling recursive
 			if err := w.Write(val); err != nil {
 				return err
 			}
 		}
-		// Array is written by writing individual values
-		_, err := w.writer.Write(bytes)
-		return err
-
-		// Wait, the recursion above is wrong. I append bytes for Array header, then write them, THEN loop?
-		// No, order matters. Header first.
-		// Let's restructure.
+	case BulkString:
+		if v.IsNull {
+			return w.WriteNull()
+		}
+		return w.WriteBulkString(v.Bulk)
+	case SimpleString:
+		return w.WriteSimpleString(v.Str)
+	case Error:
+		return w.WriteError(v.Str)
+	case Integer:
+		return w.WriteInteger(v.Num)
+	default:
+		return fmt.Errorf("unknown type: %v", v.Type)
 	}
 	return nil
 }
 
-// Better writer methods
-
 func (w *Writer) WriteSimpleString(s string) error {
-	_, err := fmt.Fprintf(w.writer, "+%s\r\n", s)
+	if err := w.writer.WriteByte(SimpleString); err != nil {
+		return err
+	}
+	if _, err := w.writer.WriteString(s); err != nil {
+		return err
+	}
+	_, err := w.writer.WriteString(CRLF)
 	return err
 }
 
 func (w *Writer) WriteError(s string) error {
-	_, err := fmt.Fprintf(w.writer, "-%s\r\n", s)
+	if err := w.writer.WriteByte(Error); err != nil {
+		return err
+	}
+	if _, err := w.writer.WriteString(s); err != nil {
+		return err
+	}
+	_, err := w.writer.WriteString(CRLF)
 	return err
 }
 
 func (w *Writer) WriteInteger(i int64) error {
-	_, err := fmt.Fprintf(w.writer, ":%d\r\n", i)
+	if err := w.writer.WriteByte(Integer); err != nil {
+		return err
+	}
+	w.buf = w.buf[:0]
+	w.buf = strconv.AppendInt(w.buf, i, 10)
+	if _, err := w.writer.Write(w.buf); err != nil {
+		return err
+	}
+	_, err := w.writer.WriteString(CRLF)
 	return err
 }
 
 func (w *Writer) WriteBulkString(s string) error {
-	_, err := fmt.Fprintf(w.writer, "$%d\r\n%s\r\n", len(s), s)
+	if err := w.writer.WriteByte(BulkString); err != nil {
+		return err
+	}
+	w.buf = w.buf[:0]
+	w.buf = strconv.AppendInt(w.buf, int64(len(s)), 10)
+	if _, err := w.writer.Write(w.buf); err != nil {
+		return err
+	}
+	if _, err := w.writer.WriteString(CRLF); err != nil {
+		return err
+	}
+	if _, err := w.writer.WriteString(s); err != nil {
+		return err
+	}
+	_, err := w.writer.WriteString(CRLF)
 	return err
 }
 
 func (w *Writer) WriteNull() error {
-	_, err := fmt.Fprintf(w.writer, "$-1\r\n")
+	_, err := w.writer.WriteString("$-1\r\n")
 	return err
 }
 
 func (w *Writer) WriteArray(len int) error {
-	_, err := fmt.Fprintf(w.writer, "*%d\r\n", len)
+	if err := w.writer.WriteByte(Array); err != nil {
+		return err
+	}
+	w.buf = w.buf[:0]
+	w.buf = strconv.AppendInt(w.buf, int64(len), 10)
+	if _, err := w.writer.Write(w.buf); err != nil {
+		return err
+	}
+	_, err := w.writer.WriteString(CRLF)
 	return err
 }
 
 func (w *Writer) WritePush(len int) error {
-	_, err := fmt.Fprintf(w.writer, ">%d\r\n", len)
+	if err := w.writer.WriteByte(Push); err != nil {
+		return err
+	}
+	w.buf = w.buf[:0]
+	w.buf = strconv.AppendInt(w.buf, int64(len), 10)
+	if _, err := w.writer.Write(w.buf); err != nil {
+		return err
+	}
+	_, err := w.writer.WriteString(CRLF)
 	return err
 }
 
 func (w *Writer) WriteMap(len int) error {
-	_, err := fmt.Fprintf(w.writer, "%%%d\r\n", len)
+	if err := w.writer.WriteByte('%'); err != nil {
+		return err
+	}
+	w.buf = w.buf[:0]
+	w.buf = strconv.AppendInt(w.buf, int64(len), 10)
+	if _, err := w.writer.Write(w.buf); err != nil {
+		return err
+	}
+	_, err := w.writer.WriteString(CRLF)
 	return err
 }
