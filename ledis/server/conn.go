@@ -312,10 +312,13 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		results := make([]*bytes.Buffer, len(queue))
 		var wg sync.WaitGroup
 
-		for shardID, indices := range shardCmds {
+		for _, indices := range shardCmds {
 			// Launch goroutine for this shard
 			wg.Add(1)
-			go func(sid int, idxs []int) {
+			// Launch goroutine for this shard using ants pool
+
+			idxs := indices
+			_ = c.db.WorkerPool.Submit(func() {
 				defer wg.Done()
 				for _, idx := range idxs {
 					// Prepare buffer
@@ -328,12 +331,14 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 					// c.writer is NOT used. We pass a new Writer wrapping our buffer.
 					q := queue[idx]
 
+					// Check if we need to create a new Writer or can reuse?
+					// For now new Writer is cheap.
 					bufferedWriter := NewWriter(buf)
 
 					// Lock is NOT held here.
 					c.execute(q[0], q[1:], bufferedWriter, nil)
 				}
-			}(shardID, indices)
+			})
 		}
 
 		wg.Wait()
