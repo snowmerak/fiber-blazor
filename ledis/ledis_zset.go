@@ -674,11 +674,12 @@ func (d *DistributedMap) ZInterStore(destination string, keys ...string) (int64,
 		m := make(map[string]float64)
 
 		item.Mu.RLock()
-		if item.Type == TypeZSet {
+		switch item.Type {
+		case TypeZSet:
 			if item.ZSet != nil {
 				maps0.Copy(m, item.ZSet.dict)
 			}
-		} else if item.Type == TypeSet {
+		case TypeSet:
 			// Access set data
 			// item.Set is map[string]struct{}
 			if item.Set != nil {
@@ -686,7 +687,7 @@ func (d *DistributedMap) ZInterStore(destination string, keys ...string) (int64,
 					m[member] = 1.0 // Default score for SET
 				}
 			}
-		} else {
+		default:
 			item.Mu.RUnlock()
 			return 0, ErrWrongType
 		}
