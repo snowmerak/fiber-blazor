@@ -155,6 +155,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		}
 		for _, key := range args {
 			c.watching[key] = true
+			c.db.Track(key, c) // Register for invalidation
 		}
 		c.mu.Lock()
 		c.writer.WriteSimpleString("OK")

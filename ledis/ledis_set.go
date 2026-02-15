@@ -1,88 +1,107 @@
 package ledis
 
 import (
+	"fmt"
 	"math/rand"
-	"sync"
 	"time"
 )
 
-type Set struct {
-	mu   sync.RWMutex
-	Data map[interface{}]struct{}
-}
-
-func NewSet() *Set {
-	return &Set{
-		Data: make(map[interface{}]struct{}),
-	}
-}
-
-// Helper to get or create a set
-func (d *DistributedMap) getOrCreateSet(key string) (*Set, error) {
-	shard := d.getShard(key)
-	val, ok := shard.Load(key)
-	if !ok {
-		s := NewSet()
-		val, loaded := shard.LoadOrStore(key, Item{Value: s, ExpiresAt: 0})
-		if loaded {
-			item := val.(Item)
-			if sVal, ok := item.Value.(*Set); ok {
-				return sVal, nil
-			}
-			return nil, ErrWrongType
-		}
-		return s, nil
-	}
-
-	item := val.(Item)
-	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
-		s := NewSet()
-		shard.Store(key, Item{Value: s, ExpiresAt: 0})
-		return s, nil
-	}
-
-	s, ok := item.Value.(*Set)
-	if !ok {
-		return nil, ErrWrongType
-	}
-	return s, nil
-}
-
-// Helper to get set if exists
-func (d *DistributedMap) getSet(key string) (*Set, error) {
+// Helper to get set item if exists
+func (d *DistributedMap) getSetItem(key string) (*Item, error) {
 	shard := d.getShard(key)
 	val, ok := shard.Load(key)
 	if !ok {
 		return nil, nil // Not found
 	}
 
-	item := val.(Item)
+	item := val.(*Item)
 	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
 		shard.Delete(key)
+		d.NotifyObservers(key)
+		// item.reset()
+		// itemPool.Put(item)
 		return nil, nil
 	}
 
-	s, ok := item.Value.(*Set)
-	if !ok {
+	if item.Type != TypeSet {
 		return nil, ErrWrongType
 	}
-	return s, nil
+	return item, nil
+}
+
+// Helper to get or create a set item
+func (d *DistributedMap) getOrCreateSetItem(key string) (*Item, error) {
+	shard := d.getShard(key)
+	val, loaded := shard.Load(key)
+
+	if loaded {
+		item := val.(*Item)
+		if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
+			shard.Delete(key)
+			d.NotifyObservers(key)
+			// item.reset()
+			// itemPool.Put(item)
+			loaded = false
+		} else {
+			if item.Type != TypeSet {
+				return nil, ErrWrongType
+			}
+			return item, nil
+		}
+	}
+
+	// Create new
+	newItem := itemPool.Get().(*Item)
+	newItem.reset()
+	newItem.Type = TypeSet
+	newItem.Set = make(map[string]struct{})
+	newItem.ExpiresAt = 0
+
+	actual, loaded := shard.LoadOrStore(key, newItem)
+	if loaded {
+		newItem.reset()
+		itemPool.Put(newItem)
+
+		item := actual.(*Item)
+		if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
+			return d.getOrCreateSetItem(key)
+		}
+		if item.Type != TypeSet {
+			return nil, ErrWrongType
+		}
+		return item, nil
+	}
+
+	d.NotifyObservers(key)
+	return newItem, nil
 }
 
 // SAdd adds the specified members to the set stored at key.
 func (d *DistributedMap) SAdd(key string, members ...interface{}) (int, error) {
-	s, err := d.getOrCreateSet(key)
+	item, err := d.getOrCreateSetItem(key)
 	if err != nil {
 		return 0, err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	item.Mu.Lock()
+	defer item.Mu.Unlock()
+
+	if item.Set == nil {
+		item.Set = make(map[string]struct{})
+	}
 
 	added := 0
 	for _, m := range members {
-		if _, exists := s.Data[m]; !exists {
-			s.Data[m] = struct{}{}
+		strVal := ""
+		switch v := m.(type) {
+		case string:
+			strVal = v
+		default:
+			strVal = fmt.Sprintf("%v", v)
+		}
+
+		if _, exists := item.Set[strVal]; !exists {
+			item.Set[strVal] = struct{}{}
 			added++
 		}
 	}
@@ -91,26 +110,36 @@ func (d *DistributedMap) SAdd(key string, members ...interface{}) (int, error) {
 
 // SRem removes the specified members from the set stored at key.
 func (d *DistributedMap) SRem(key string, members ...interface{}) (int, error) {
-	s, err := d.getSet(key)
+	item, err := d.getSetItem(key)
 	if err != nil {
 		return 0, err
 	}
-	if s == nil {
+	if item == nil {
 		return 0, nil
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	item.Mu.Lock()
 
 	removed := 0
 	for _, m := range members {
-		if _, exists := s.Data[m]; exists {
-			delete(s.Data, m)
+		strVal := ""
+		switch v := m.(type) {
+		case string:
+			strVal = v
+		default:
+			strVal = fmt.Sprintf("%v", v)
+		}
+
+		if _, exists := item.Set[strVal]; exists {
+			delete(item.Set, strVal)
 			removed++
 		}
 	}
 
-	if len(s.Data) == 0 {
+	isEmpty := len(item.Set) == 0
+	item.Mu.Unlock()
+
+	if isEmpty {
 		d.Del(key)
 	}
 
@@ -119,52 +148,60 @@ func (d *DistributedMap) SRem(key string, members ...interface{}) (int, error) {
 
 // SIsMember returns if member is a member of the set stored at key.
 func (d *DistributedMap) SIsMember(key string, member interface{}) (bool, error) {
-	s, err := d.getSet(key)
+	strVal := ""
+	switch v := member.(type) {
+	case string:
+		strVal = v
+	default:
+		strVal = fmt.Sprintf("%v", v)
+	}
+
+	item, err := d.getSetItem(key)
 	if err != nil {
 		return false, err
 	}
-	if s == nil {
+	if item == nil {
 		return false, nil
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
 
-	_, exists := s.Data[member]
+	_, exists := item.Set[strVal]
 	return exists, nil
 }
 
 // SCard returns the set cardinality (number of elements) of the set stored at key.
 func (d *DistributedMap) SCard(key string) (int, error) {
-	s, err := d.getSet(key)
+	item, err := d.getSetItem(key)
 	if err != nil {
 		return 0, err
 	}
-	if s == nil {
+	if item == nil {
 		return 0, nil
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
 
-	return len(s.Data), nil
+	return len(item.Set), nil
 }
 
 // SMembers returns all the members of the set value stored at key.
 func (d *DistributedMap) SMembers(key string) ([]interface{}, error) {
-	s, err := d.getSet(key)
+	item, err := d.getSetItem(key)
 	if err != nil {
 		return nil, err
 	}
-	if s == nil {
+	if item == nil {
 		return []interface{}{}, nil
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
 
-	members := make([]interface{}, 0, len(s.Data))
-	for m := range s.Data {
+	members := make([]interface{}, 0, len(item.Set))
+	for m := range item.Set {
 		members = append(members, m)
 	}
 	return members, nil
@@ -172,16 +209,6 @@ func (d *DistributedMap) SMembers(key string) ([]interface{}, error) {
 
 // SMove moves member from the set at source to the set at destination.
 func (d *DistributedMap) SMove(source, destination string, member interface{}) (bool, error) {
-	// Need to lock both sets?
-	// To avoid deadlocks, we should lock in consistent order or use fine-grained.
-	// Simple approach: SRem from source. If successful, SAdd to destination.
-	// But valid SMove requires atomic behavior?
-	// Truly atomic cross-shard logic requires a global lock or careful orchestration.
-	// For this simple implementation, we will do it in two steps, which is NOT atomic
-	// but avoids complex locking logic.
-	// If strict atomicity is required, we'd need distributed locking/transaction support.
-
-	// Check if source has member manually to avoid side effects first?
 	exists, err := d.SIsMember(source, member)
 	if err != nil {
 		return false, err
@@ -190,7 +217,6 @@ func (d *DistributedMap) SMove(source, destination string, member interface{}) (
 		return false, nil
 	}
 
-	// Remove from source
 	n, err := d.SRem(source, member)
 	if err != nil {
 		return false, err
@@ -199,12 +225,8 @@ func (d *DistributedMap) SMove(source, destination string, member interface{}) (
 		return false, nil // Lost race?
 	}
 
-	// Add to destination
 	_, err = d.SAdd(destination, member)
 	if err != nil {
-		// Rollback? SAdd should rarely fail if we create set.
-		// If SAdd fails (WrongType), we lost the item from source!
-		// We should add it back to source.
 		d.SAdd(source, member)
 		return false, err
 	}
@@ -214,31 +236,28 @@ func (d *DistributedMap) SMove(source, destination string, member interface{}) (
 
 // SPop removes and returns a random member from the set value stored at key.
 func (d *DistributedMap) SPop(key string) (interface{}, error) {
-	s, err := d.getSet(key)
+	item, err := d.getSetItem(key)
 	if err != nil {
 		return nil, err
 	}
-	if s == nil {
+	if item == nil {
 		return nil, nil
 	}
 
-	s.mu.Lock() // Write lock needed
-	defer s.mu.Unlock()
+	item.Mu.Lock()
 
-	if len(s.Data) == 0 {
-		return nil, nil
-	}
-
-	// Go map iteration is random-ish, but relying on it is valid for "random member".
-	var member interface{}
-	for m := range s.Data {
+	var member string
+	for m := range item.Set {
 		member = m
-		break // Pick first one
+		break // Pick first one (random-ish)
 	}
 
-	delete(s.Data, member)
+	delete(item.Set, member)
 
-	if len(s.Data) == 0 {
+	isEmpty := len(item.Set) == 0
+	item.Mu.Unlock()
+
+	if isEmpty {
 		d.Del(key)
 	}
 
@@ -247,24 +266,20 @@ func (d *DistributedMap) SPop(key string) (interface{}, error) {
 
 // SRandMember returns a random member from the set value stored at key.
 func (d *DistributedMap) SRandMember(key string, count int) ([]interface{}, error) {
-	s, err := d.getSet(key)
+	item, err := d.getSetItem(key)
 	if err != nil {
 		return nil, err
 	}
-	if s == nil {
+	if item == nil {
 		return nil, nil
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
 
-	if len(s.Data) == 0 {
+	if len(item.Set) == 0 {
 		return nil, nil
 	}
-
-	// If count > 0, return count distinct elements.
-	// If count < 0, return |count| elements allowing duplicates.
-	// If count == 0, return empty?
 
 	if count == 0 {
 		return []interface{}{}, nil
@@ -273,21 +288,15 @@ func (d *DistributedMap) SRandMember(key string, count int) ([]interface{}, erro
 	result := make([]interface{}, 0)
 
 	if count > 0 {
-		if count >= len(s.Data) {
-			// Return all
-			for m := range s.Data {
+		if count >= len(item.Set) {
+			for m := range item.Set {
 				result = append(result, m)
 			}
 			return result, nil
 		}
 
-		// Pick count distinct
-		// Basic map iteration is random enough or need proper random?
-		// Map iteration order is random but not uniformly distributed cryptographic random.
-		// For cached DB like strict randomness is nice but map iteration often serves as "random".
-		// But if we want exactly 'count', we iterate.
 		c := 0
-		for m := range s.Data {
+		for m := range item.Set {
 			result = append(result, m)
 			c++
 			if c >= count {
@@ -296,15 +305,8 @@ func (d *DistributedMap) SRandMember(key string, count int) ([]interface{}, erro
 		}
 	} else {
 		count = -count
-		// Allow duplicates.
-		// Convert map keys to slice then pick random? Expensive for large sets.
-		// But iterating map is linear scan.
-		// If set is huge and we want 5 random items, we can't easily pick random index.
-		// We have to iterate or maintain slice.
-		// Trade-off: Converting to slice to pick random 5?
-		// Let's do slice conversion for now.
-		keys := make([]interface{}, 0, len(s.Data))
-		for m := range s.Data {
+		keys := make([]string, 0, len(item.Set))
+		for m := range item.Set {
 			keys = append(keys, m)
 		}
 
@@ -326,9 +328,9 @@ func (d *DistributedMap) SDiff(keys ...string) ([]interface{}, error) {
 	}
 
 	// Fetch all sets
-	sets := make([]*Set, len(keys))
+	sets := make([]*Item, len(keys))
 	for i, k := range keys {
-		s, err := d.getSet(k)
+		s, err := d.getSetItem(k)
 		if err != nil {
 			return nil, err
 		}
@@ -339,25 +341,23 @@ func (d *DistributedMap) SDiff(keys ...string) ([]interface{}, error) {
 		return []interface{}{}, nil
 	}
 
-	// Lock all? Or Read-Lock.
-	// We snapshot data.
-	base := make(map[interface{}]struct{})
-	sets[0].mu.RLock()
-	for m := range sets[0].Data {
+	base := make(map[string]struct{})
+	sets[0].Mu.RLock()
+	for m := range sets[0].Set {
 		base[m] = struct{}{}
 	}
-	sets[0].mu.RUnlock()
+	sets[0].Mu.RUnlock()
 
 	for i := 1; i < len(sets); i++ {
 		s := sets[i]
 		if s == nil {
 			continue
 		}
-		s.mu.RLock()
-		for m := range s.Data {
+		s.Mu.RLock()
+		for m := range s.Set {
 			delete(base, m)
 		}
-		s.mu.RUnlock()
+		s.Mu.RUnlock()
 	}
 
 	result := make([]interface{}, 0, len(base))
@@ -387,39 +387,35 @@ func (d *DistributedMap) SInter(keys ...string) ([]interface{}, error) {
 	}
 
 	// Fetch all
-	sets := make([]*Set, len(keys))
+	sets := make([]*Item, len(keys))
 	for i, k := range keys {
-		s, err := d.getSet(k)
+		s, err := d.getSetItem(k)
 		if err != nil {
 			return nil, err
 		}
 		sets[i] = s
 		if s == nil {
-			// intersection with empty set is empty
 			return []interface{}{}, nil
 		}
 	}
 
-	// Start with first set
-	// Optimization: start with smallest set?
-
-	base := make(map[interface{}]struct{})
-	sets[0].mu.RLock()
-	for m := range sets[0].Data {
+	base := make(map[string]struct{})
+	sets[0].Mu.RLock()
+	for m := range sets[0].Set {
 		base[m] = struct{}{}
 	}
-	sets[0].mu.RUnlock()
+	sets[0].Mu.RUnlock()
 
 	for i := 1; i < len(sets); i++ {
 		s := sets[i]
-		nextBase := make(map[interface{}]struct{})
-		s.mu.RLock()
+		nextBase := make(map[string]struct{})
+		s.Mu.RLock()
 		for m := range base {
-			if _, exists := s.Data[m]; exists {
+			if _, exists := s.Set[m]; exists {
 				nextBase[m] = struct{}{}
 			}
 		}
-		s.mu.RUnlock()
+		s.Mu.RUnlock()
 		base = nextBase
 		if len(base) == 0 {
 			break
@@ -450,21 +446,21 @@ func (d *DistributedMap) SUnion(keys ...string) ([]interface{}, error) {
 		return []interface{}{}, nil
 	}
 
-	base := make(map[interface{}]struct{})
+	base := make(map[string]struct{})
 
 	for _, k := range keys {
-		s, err := d.getSet(k)
+		s, err := d.getSetItem(k)
 		if err != nil {
 			return nil, err
 		}
 		if s == nil {
 			continue
 		}
-		s.mu.RLock()
-		for m := range s.Data {
+		s.Mu.RLock()
+		for m := range s.Set {
 			base[m] = struct{}{}
 		}
-		s.mu.RUnlock()
+		s.Mu.RUnlock()
 	}
 
 	result := make([]interface{}, 0, len(base))

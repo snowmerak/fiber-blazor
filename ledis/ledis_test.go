@@ -87,7 +87,7 @@ func TestConcurrency(t *testing.T) {
 				if !ok {
 					t.Errorf("Expected %s to exist", key)
 				}
-				if val != j {
+				if fmt.Sprintf("%v", val) != fmt.Sprintf("%d", j) {
 					t.Errorf("Expected %d, got %v", j, val)
 				}
 			}

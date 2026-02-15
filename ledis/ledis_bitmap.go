@@ -1,94 +1,104 @@
 package ledis
 
 import (
-	"sync"
 	"time"
 
 	"github.com/RoaringBitmap/roaring/roaring64"
 )
 
-type Bitmap struct {
-	mu   sync.RWMutex
-	Data *roaring64.Bitmap
-}
-
-func NewBitmap() *Bitmap {
-	return &Bitmap{
-		Data: roaring64.New(),
-	}
-}
-
-// Helper to get or create Bitmap
-func (d *DistributedMap) getOrCreateBitmap(key string) (*Bitmap, error) {
-	shard := d.getShard(key)
-	val, ok := shard.Load(key)
-	if !ok {
-		b := NewBitmap()
-		val, loaded := shard.LoadOrStore(key, Item{Value: b, ExpiresAt: 0})
-		if loaded {
-			item := val.(Item)
-			if bVal, ok := item.Value.(*Bitmap); ok {
-				return bVal, nil
-			}
-			return nil, ErrWrongType
-		}
-		return b, nil
-	}
-
-	item := val.(Item)
-	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
-		b := NewBitmap()
-		shard.Store(key, Item{Value: b, ExpiresAt: 0})
-		return b, nil
-	}
-
-	b, ok := item.Value.(*Bitmap)
-	if !ok {
-		return nil, ErrWrongType
-	}
-	return b, nil
-}
-
-// Helper to get Bitmap if exists
-func (d *DistributedMap) getBitmap(key string) (*Bitmap, error) {
+// Helper to get bitmap item if exists
+func (d *DistributedMap) getBitmapItem(key string) (*Item, error) {
 	shard := d.getShard(key)
 	val, ok := shard.Load(key)
 	if !ok {
 		return nil, nil // Not found
 	}
 
-	item := val.(Item)
+	item := val.(*Item)
 	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
-		d.Del(key)
+		shard.Delete(key)
+		d.NotifyObservers(key)
+		// item.reset()
+		// itemPool.Put(item)
 		return nil, nil
 	}
 
-	b, ok := item.Value.(*Bitmap)
-	if !ok {
+	if item.Type != TypeBitmap {
 		return nil, ErrWrongType
 	}
-	return b, nil
+	return item, nil
+}
+
+// Helper to get or create a bitmap item
+func (d *DistributedMap) getOrCreateBitmapItem(key string) (*Item, error) {
+	shard := d.getShard(key)
+	val, loaded := shard.Load(key)
+
+	if loaded {
+		item := val.(*Item)
+		if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
+			shard.Delete(key)
+			d.NotifyObservers(key)
+			// item.reset()
+			// itemPool.Put(item)
+			loaded = false
+		} else {
+			if item.Type != TypeBitmap {
+				return nil, ErrWrongType
+			}
+			return item, nil
+		}
+	}
+
+	// Create new
+	newItem := itemPool.Get().(*Item)
+	newItem.reset()
+	newItem.Type = TypeBitmap
+	newItem.Bitmap = roaring64.New()
+	newItem.ExpiresAt = 0
+
+	actual, loaded := shard.LoadOrStore(key, newItem)
+	if loaded {
+		newItem.reset()
+		itemPool.Put(newItem)
+
+		item := actual.(*Item)
+		if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
+			return d.getOrCreateBitmapItem(key)
+		}
+		if item.Type != TypeBitmap {
+			return nil, ErrWrongType
+		}
+		return item, nil
+	}
+
+	d.NotifyObservers(key)
+	return newItem, nil
 }
 
 // SetBit sets or clears the bit at offset in the string value stored at key.
 func (d *DistributedMap) SetBit(key string, offset uint64, value int) (int, error) {
-	b, err := d.getOrCreateBitmap(key)
+	item, err := d.getOrCreateBitmapItem(key)
 	if err != nil {
 		return 0, err
 	}
 
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	item.Mu.Lock()
+	defer item.Mu.Unlock()
+
+	if item.Bitmap == nil {
+		item.Bitmap = roaring64.New()
+	}
 
 	original := 0
-	if b.Data.Contains(offset) {
+	if item.Bitmap.Contains(offset) {
 		original = 1
 	}
 
 	if value == 1 {
-		b.Data.Add(offset)
+		item.Bitmap.Add(offset)
 	} else {
-		b.Data.Remove(offset)
+		item.Bitmap.Remove(offset)
 	}
 
 	return original, nil
@@ -96,18 +106,18 @@ func (d *DistributedMap) SetBit(key string, offset uint64, value int) (int, erro
 
 // GetBit returns the bit value at offset in the string value stored at key.
 func (d *DistributedMap) GetBit(key string, offset uint64) (int, error) {
-	b, err := d.getBitmap(key)
+	item, err := d.getBitmapItem(key)
 	if err != nil {
 		return 0, err
 	}
-	if b == nil {
+	if item == nil {
 		return 0, nil
 	}
 
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
 
-	if b.Data.Contains(offset) {
+	if item.Bitmap != nil && item.Bitmap.Contains(offset) {
 		return 1, nil
 	}
 	return 0, nil
@@ -115,18 +125,22 @@ func (d *DistributedMap) GetBit(key string, offset uint64) (int, error) {
 
 // BitCount performs a population count (popcount) on the bitmap.
 func (d *DistributedMap) BitCount(key string) (uint64, error) {
-	b, err := d.getBitmap(key)
+	item, err := d.getBitmapItem(key)
 	if err != nil {
 		return 0, err
 	}
-	if b == nil {
+	if item == nil {
 		return 0, nil
 	}
 
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
 
-	return b.Data.GetCardinality(), nil
+	if item.Bitmap == nil {
+		return 0, nil
+	}
+
+	return item.Bitmap.GetCardinality(), nil
 }
 
 // BitOp performs a bitwise operation between multiple keys (destKey = op key1 key2 ...)
@@ -136,44 +150,39 @@ func (d *DistributedMap) BitOp(op string, destKey string, keys ...string) (int64
 		if len(keys) != 1 {
 			return 0, nil // NOT requires exactly 1 key
 		}
-		// Logic for NOT on a bitmap?
-		// Roaring bitmaps are sparse. NOT on a sparse bitmap essentially makes it dense?
-		// Or does it mean specific range? Redis BitOp NOT inverts bits.
-		// Roaring 'Flip' operation requires a range.
-		// Redis string logic: NOT inverts bytes.
-		// For sparse bitmaps, "NOT" is ambiguous without a universe size.
-		// If we treat it as infinite 0s, NOT makes infinite 1s.
-		// However, typical use case is flip within range 0..MaxSetBit?
-		// Roaring64 has func (rb *Bitmap) Flip(rangeStart, rangeEnd uint64)
-		// We can support NOT by flipping from 0 to Maximum element?
-		// Or just not support NOT efficiently?
-		// Let's implement NOT as Flip(0, MaxKey). If empty, 0.
 
-		src, err := d.getBitmap(keys[0])
+		srcItem, err := d.getBitmapItem(keys[0])
 		if err != nil {
 			return 0, err
 		}
 
 		dest := roaring64.New()
-		if src != nil {
-			src.mu.RLock()
-			// Clone first
-			dest = src.Data.Clone()
-			// Find max
-			if !dest.IsEmpty() {
-				max := dest.Maximum()
-				dest.Flip(0, max+1) // Flip 0..Max
+		if srcItem != nil {
+			srcItem.Mu.RLock()
+			if srcItem.Bitmap != nil {
+				// Clone first
+				dest = srcItem.Bitmap.Clone()
+				// Find max
+				if !dest.IsEmpty() {
+					max := dest.Maximum()
+					dest.Flip(0, max+1) // Flip 0..Max
+				}
 			}
-			src.mu.RUnlock()
+			srcItem.Mu.RUnlock()
 		}
 
 		d.Del(destKey)
+
 		// Save
-		b := NewBitmap()
-		b.Data = dest
+		newItem := itemPool.Get().(*Item)
+		newItem.reset()
+		newItem.Type = TypeBitmap
+		newItem.Bitmap = dest
+		newItem.ExpiresAt = 0
 
 		shard := d.getShard(destKey)
-		shard.Store(destKey, Item{Value: b, ExpiresAt: 0})
+		shard.Store(destKey, newItem)
+		d.NotifyObservers(destKey)
 
 		return int64(dest.GetCardinality()), nil
 	}
@@ -181,23 +190,15 @@ func (d *DistributedMap) BitOp(op string, destKey string, keys ...string) (int64
 	// For AND, OR, XOR
 	res := roaring64.New()
 
-	// Need to initialize 'res' correctly for AND.
-	// OR/XOR start with empty is fine.
-	// AND needs to start with first set? Or handle first separately.
-
 	first := true
 
 	for _, k := range keys {
-		b, err := d.getBitmap(k)
+		item, err := d.getBitmapItem(k)
 		if err != nil {
 			return 0, err
 		}
 
-		if b == nil {
-			// If missing key treated as 0s.
-			// AND with 0 -> 0 (res becomes empty)
-			// OR with 0 -> no change
-			// XOR with 0 -> no change
+		if item == nil {
 			if op == "AND" {
 				res.Clear()
 				break
@@ -205,21 +206,30 @@ func (d *DistributedMap) BitOp(op string, destKey string, keys ...string) (int64
 			continue
 		}
 
-		b.mu.RLock()
+		item.Mu.RLock()
+		if item.Bitmap == nil {
+			item.Mu.RUnlock()
+			if op == "AND" {
+				res.Clear()
+				break
+			}
+			continue
+		}
+
 		if first {
-			res = b.Data.Clone()
+			res = item.Bitmap.Clone()
 			first = false
 		} else {
 			switch op {
 			case "AND":
-				res.And(b.Data)
+				res.And(item.Bitmap)
 			case "OR":
-				res.Or(b.Data)
+				res.Or(item.Bitmap)
 			case "XOR":
-				res.Xor(b.Data)
+				res.Xor(item.Bitmap)
 			}
 		}
-		b.mu.RUnlock()
+		item.Mu.RUnlock()
 	}
 
 	if op == "AND" && first {
@@ -229,10 +239,16 @@ func (d *DistributedMap) BitOp(op string, destKey string, keys ...string) (int64
 
 	d.Del(destKey)
 	if res.GetCardinality() > 0 {
-		b := NewBitmap()
-		b.Data = res
+		newItem := itemPool.Get().(*Item)
+		newItem.reset()
+		newItem.Type = TypeBitmap
+		newItem.Bitmap = res
+		newItem.ExpiresAt = 0
+
 		shard := d.getShard(destKey)
-		shard.Store(destKey, Item{Value: b, ExpiresAt: 0})
+		shard.Store(destKey, newItem)
+		d.NotifyObservers(destKey)
+
 		return int64(res.GetCardinality()), nil
 	}
 	return 0, nil

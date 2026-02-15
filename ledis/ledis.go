@@ -1,15 +1,97 @@
 package ledis
 
 import (
+	"fmt" // Added for fmt.Sprintf in Set method
 	"hash/maphash"
 	"math/bits"
+	"strconv" // Added for toInt64
 	"sync"
 	"time"
+
+	"github.com/RoaringBitmap/roaring/roaring64"
+)
+
+const (
+	TypeString = iota
+	TypeList
+	TypeHash
+	TypeSet
+	TypeZSet
+	TypeStream
+	TypeBitmap
 )
 
 type Item struct {
-	Value     interface{}
+	Type      uint8
 	ExpiresAt int64
+	Mu        sync.RWMutex // Protects mutable fields
+
+	// Value holders - Concrete types to avoid interface{} boxing
+	Str    string
+	List   []string
+	Hash   map[string]string
+	Set    map[string]struct{}
+	ZSet   *SortedSet
+	Bitmap *roaring64.Bitmap
+	Stream *Stream
+
+	// Waiters for blocking list operations
+	Waiters []chan string
+}
+
+func (i *Item) reset() {
+	i.Type = 0
+	i.ExpiresAt = 0
+	// Mu state is not reset, but if we reuse, we assume no one holds lock
+	i.Str = ""
+	i.List = nil
+	i.Hash = nil
+	i.Set = nil
+	i.ZSet = nil
+	i.Bitmap = nil
+	i.Stream = nil
+	i.Waiters = nil
+}
+
+// Helper to convert numeric types to int64
+func toInt64(val interface{}) (int64, error) {
+	switch v := val.(type) {
+	case int:
+		return int64(v), nil
+	case int8:
+		return int64(v), nil
+	case int16:
+		return int64(v), nil
+	case int32:
+		return int64(v), nil
+	case int64:
+		return v, nil
+	case uint:
+		return int64(v), nil
+	case uint8:
+		return int64(v), nil
+	case uint16:
+		return int64(v), nil
+	case uint32:
+		return int64(v), nil
+	case uint64:
+		return int64(v), nil
+	case string:
+		// Attempt parse
+		i, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("value is not an integer")
+		}
+		return i, nil
+	default:
+		return 0, fmt.Errorf("value is not an integer")
+	}
+}
+
+var itemPool = sync.Pool{
+	New: func() interface{} {
+		return &Item{}
+	},
 }
 
 type DistributedMap struct {
@@ -147,16 +229,71 @@ func (d *DistributedMap) getShard(key string) *sync.Map {
 	return d.shards[idx]
 }
 
+// Set is now internal helper or specific type setter?
+// No, Set is usually for String type in Redis.
+// But here Set was generic.
+// We need to change Set to SetString or update it to handle generic value if passed?
+// The original Set took interface{}.
+// To support backward compatibility or easy refactor, checking type of value is needed?
+// Actually, generic Set is rarely used if we have SetString, SetList etc.
+// But lets keep it for String mostly or refactor `ledis_string.go` to use `setItem`.
+// For now, let's implement `setItem` helper and generic Set acting as String Set?
+// Or better, update Set to take string value?
+// The interface `Set(key string, value interface{}, duration time.Duration)` suggests generic.
+// If I change `Item`, `Set` must convert `value` to appropriate field.
+// This is messy if we keep `Set` generic.
+// Better to deprecate `Set` and use `SetString`, `SetList` etc.
+// But for this file, let's update `Set` to handle String only or panic/error?
+// Or type switch.
+
 func (d *DistributedMap) Set(key string, value interface{}, duration time.Duration) {
-	shard := d.getShard(key)
-	expiresAt := int64(0)
+	// Assumes String for generic Set, or type switch
+	// Ideally we refactor usages.
+	// For now, support string only or basic types
+
+	item := itemPool.Get().(*Item)
+	item.reset() // Ensure clean state
+
+	item.ExpiresAt = 0
 	if duration > 0 {
-		expiresAt = time.Now().Add(duration).UnixNano()
+		item.ExpiresAt = time.Now().Add(duration).UnixNano()
 	}
-	shard.Store(key, Item{
-		Value:     value,
-		ExpiresAt: expiresAt,
-	})
+
+	switch v := value.(type) {
+	case string:
+		item.Type = TypeString
+		item.Str = v
+	case []string:
+		item.Type = TypeList
+		item.List = v
+	case map[string]string:
+		item.Type = TypeHash
+		item.Hash = v
+	case map[string]struct{}:
+		item.Type = TypeSet
+		item.Set = v
+	default:
+		// Fallback or error? For now assume string if unknown or let it fail?
+		// Previous impl stored anything.
+		// If we want to support any interface{}, we can't with this Item struct easily.
+		// But existing code mostly uses primitives.
+		// We'll trust callers pass supported types or we add `Any interface{}` field?
+		// No, that defeats the purpose.
+		// Let's assume String for now as default fallthrough if simple Set is called.
+		item.Type = TypeString
+		item.Str = fmt.Sprintf("%v", v)
+	}
+
+	shard := d.getShard(key)
+	// Check existing to release to pool?
+	if old, ok := shard.Load(key); ok {
+		if _, ok := old.(*Item); ok {
+			// oldItem.reset()
+			// itemPool.Put(oldItem)
+		}
+	}
+
+	shard.Store(key, item)
 	d.NotifyObservers(key)
 }
 
@@ -167,20 +304,46 @@ func (d *DistributedMap) Get(key string) (interface{}, bool) {
 		return nil, false
 	}
 
-	item := val.(Item)
+	item := val.(*Item) // Now it's *Item
 	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
 		shard.Delete(key)
-		d.NotifyObservers(key) // Notify on expiration
+		d.NotifyObservers(key)
+		// item.reset()
+		// itemPool.Put(item)
 		return nil, false
 	}
 
-	return item.Value, true
+	// Return concrete value based on type? Or return Item?
+	// Original returned interface{}.
+	switch item.Type {
+	case TypeString:
+		return item.Str, true
+	case TypeList:
+		return item.List, true
+	case TypeHash:
+		return item.Hash, true
+	case TypeSet:
+		return item.Set, true
+	case TypeZSet:
+		return item.ZSet, true
+	case TypeBitmap:
+		return item.Bitmap, true
+	case TypeStream:
+		return item.Stream, true
+	default:
+		return nil, true
+	}
 }
 
 func (d *DistributedMap) Del(key string) {
 	shard := d.getShard(key)
-	shard.Delete(key)
-	d.NotifyObservers(key)
+	if val, ok := shard.LoadAndDelete(key); ok {
+		if _, ok := val.(*Item); ok {
+			// item.reset()
+			// itemPool.Put(item)
+		}
+		d.NotifyObservers(key)
+	}
 }
 
 func (d *DistributedMap) Exists(key string) bool {
@@ -190,10 +353,12 @@ func (d *DistributedMap) Exists(key string) bool {
 		return false
 	}
 
-	item := val.(Item)
+	item := val.(*Item)
 	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
 		shard.Delete(key)
 		d.NotifyObservers(key)
+		// item.reset()
+		// itemPool.Put(item)
 		return false
 	}
 
@@ -207,7 +372,7 @@ func (d *DistributedMap) TTL(key string) time.Duration {
 		return -2 // Key does not exist
 	}
 
-	item := val.(Item)
+	item := val.(*Item)
 	if item.ExpiresAt == 0 {
 		return -1 // No expiration
 	}
@@ -216,7 +381,9 @@ func (d *DistributedMap) TTL(key string) time.Duration {
 	if ttl < 0 {
 		shard.Delete(key)
 		d.NotifyObservers(key) // Notify on expiration
-		return -2              // Key expired (and thus does not exist)
+		// item.reset()
+		// itemPool.Put(item)
+		return -2 // Key expired
 	}
 
 	return ttl

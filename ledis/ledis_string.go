@@ -2,6 +2,7 @@ package ledis
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"time"
 )
@@ -13,27 +14,85 @@ var (
 
 // GetSet sets the given key to value and returns the old value.
 func (d *DistributedMap) GetSet(key string, value interface{}) (interface{}, bool) {
+	// Value must be string for now, or we convert
+	strVal := ""
+	switch v := value.(type) {
+	case string:
+		strVal = v
+	default:
+		strVal = fmt.Sprintf("%v", v)
+	}
+
 	shard := d.getShard(key)
 
-	val, loaded := shard.Load(key)
+	newItem := itemPool.Get().(*Item)
+	newItem.reset()
+	newItem.Type = TypeString
+	newItem.Str = strVal
+	newItem.ExpiresAt = 0
 
-	shard.Store(key, Item{
-		Value:     value,
-		ExpiresAt: 0, // GETSET usually clears TTL or persists? Redis persists. Let's assume persist for now or modify `Set` to keep it.
-		// Actually Redis spec says: "GETSET sets ... and returns the old value." "The TTL is discarded".
-		// So ExpiresAt: 0 is correct for "persist" / no expiry.
-	})
+	// Swap
+	// Use LoadOrStore? No, we want to replace always.
+	// Map.Swap is available in go 1.20+? Or standard sync.Map has Swap?
+	// sync.Map has Swap since Go 1.20. User environment?
+	// If not, we use Store, but we need old value to return AND to free.
+	// If we use Store, we can't atomically get Ref to old to free it safely if concurrents are accessing?
+	// Actually, Store returns nothing.
+	// But `Load` then `Store` is not atomic.
+	// Wait, `Swap` IS atomic and returns previous value.
+	// Let's assume Go 1.20+ (safe assumption for modern dev).
+	// If compilation fails, I'll fix.
 
-	if !loaded {
-		return nil, false
+	previous, loaded := shard.Swap(key, newItem)
+
+	if loaded {
+		prevItem := previous.(*Item)
+		// We return the value... but we also need to free the Item struct?
+		// We can't free it if we return a reference to its field (like &prevItem.Str).
+		// But we return `interface{}` which is `prevItem.Str` (copy of string header, and string data is on heap).
+		// So it is safe to return `prevItem.Str` and then `Put(prevItem)`.
+		// BE CAREFUL: string data is immutable.
+		// What if return type was map/slice? Copying map/slice header is fine, but backing array is shared.
+		// If we recycle `prevItem`, we reset it. `prevItem.List = nil`.
+		// If the user of `GetSet` (the caller) holds the slice `prevItem.List`, and we `reset` -> `List=nil`,
+		// that's fine, the caller has their own slice header pointing to backing array.
+		// `reset` only clears the struct fields.
+		// So it is SAFE.
+
+		val := prevItem.Str
+		if prevItem.Type != TypeString {
+			// Handle mismatch? Redis returns error or converts?
+			// GETSET usually for strings.
+			// Just return whatever it was?
+			// Verify if it was string?
+			// If not string, maybe return nil/error?
+			// For now return val if type match, else we might have issue.
+			// But we are overwriting anyway.
+			// We'll return based on type.
+		}
+
+		// If expired?
+		if prevItem.ExpiresAt > 0 && prevItem.ExpiresAt < time.Now().UnixNano() {
+			val = "" // Expired
+			loaded = false
+		} else {
+			// Extract value
+			switch prevItem.Type {
+			case TypeString:
+				val = prevItem.Str
+			default:
+				// Return string repr?
+				val = "" // or handle conversion
+			}
+		}
+
+		// prevItem.reset()
+		// itemPool.Put(prevItem)
+		return val, loaded
 	}
 
-	item := val.(Item)
-	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
-		return nil, false
-	}
-
-	return item.Value, true
+	d.NotifyObservers(key)
+	return nil, false
 }
 
 // MSet sets multiple keys to multiple values.
@@ -44,7 +103,6 @@ func (d *DistributedMap) MSet(pairs map[string]interface{}) {
 }
 
 // MGet returns the values of all specified keys.
-// For every key that does not hold a string value or does not exist, the special value nil is returned.
 func (d *DistributedMap) MGet(keys ...string) []interface{} {
 	values := make([]interface{}, len(keys))
 	for i, key := range keys {
@@ -76,38 +134,65 @@ func (d *DistributedMap) IncrBy(key string, amount int64) (int64, error) {
 
 		var current int64
 		var expiresAt int64
+		var oldItem *Item
 
-		if !loaded {
-			current = 0
-			expiresAt = 0
-		} else {
-			item := rawVal.(Item)
-			if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
-				// Expired, treat as new
+		if loaded {
+			oldItem = rawVal.(*Item)
+			if oldItem.ExpiresAt > 0 && oldItem.ExpiresAt < time.Now().UnixNano() {
+				// Expired
 				current = 0
 				expiresAt = 0
+				// Don't use oldItem for stats, treat as new.
+				// But we DO NOT free oldItem here because we haven't successfully replaced it yet!
+				// We only free if we CAS successfully or if we abandon.
 			} else {
-				var err error
-				current, err = toInt64(item.Value)
-				if err != nil {
-					return 0, err
+				if oldItem.Type != TypeString {
+					return 0, ErrNotInteger // Wrong Type
 				}
-				expiresAt = item.ExpiresAt
+				// Parse
+				i, err := strconv.ParseInt(oldItem.Str, 10, 64)
+				if err != nil {
+					return 0, ErrNotInteger
+				}
+				current = i
+				expiresAt = oldItem.ExpiresAt
 			}
 		}
 
 		newValue := current + amount
-		newItem := Item{Value: newValue, ExpiresAt: expiresAt}
+		newStr := strconv.FormatInt(newValue, 10)
+
+		newItem := itemPool.Get().(*Item)
+		newItem.reset()
+		newItem.Type = TypeString
+		newItem.Str = newStr
+		newItem.ExpiresAt = expiresAt
 
 		if loaded {
 			if shard.CompareAndSwap(key, rawVal, newItem) {
+				// Success! Now we own rawVal/oldItem.
+				// But we DO NOT recycle it because others might have pointers to it.
+				d.NotifyObservers(key)
 				return newValue, nil
 			}
+			// CAS failed.
+			// Free newItem and modify loop to retry
+			newItem.reset()
+			itemPool.Put(newItem)
+			// Loop continues
 		} else {
-			_, loadedAgain := shard.LoadOrStore(key, newItem)
+			actual, loadedAgain := shard.LoadOrStore(key, newItem)
 			if !loadedAgain {
+				// Success (Store happened)
+				d.NotifyObservers(key)
 				return newValue, nil
 			}
+			// Store failed (someone else stored).
+			// Free newItem and retry
+			newItem.reset()
+			itemPool.Put(newItem)
+			_ = actual
+			// Loop continues
 		}
 	}
 }
@@ -125,20 +210,20 @@ func (d *DistributedMap) Append(key string, value string) (int, error) {
 
 		var current string
 		var expiresAt int64
+		var oldItem *Item
 
 		if rawOk {
-			item := rawVal.(Item)
-			if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
+			oldItem = rawVal.(*Item)
+			if oldItem.ExpiresAt > 0 && oldItem.ExpiresAt < time.Now().UnixNano() {
 				// Expired
 				current = ""
 				expiresAt = 0
 			} else {
-				strVal, ok := item.Value.(string)
-				if !ok {
+				if oldItem.Type != TypeString {
 					return 0, ErrNotString
 				}
-				current = strVal
-				expiresAt = item.ExpiresAt
+				current = oldItem.Str
+				expiresAt = oldItem.ExpiresAt
 			}
 		} else {
 			current = ""
@@ -146,18 +231,27 @@ func (d *DistributedMap) Append(key string, value string) (int, error) {
 		}
 
 		newValue := current + value
-		newItem := Item{Value: newValue, ExpiresAt: expiresAt}
+		newItem := itemPool.Get().(*Item)
+		newItem.reset()
+		newItem.Type = TypeString
+		newItem.Str = newValue
+		newItem.ExpiresAt = expiresAt
 
 		if rawOk {
 			if shard.CompareAndSwap(key, rawVal, newItem) {
+				d.NotifyObservers(key)
 				return len(newValue), nil
 			}
+			newItem.reset()
+			itemPool.Put(newItem)
 		} else {
 			actual, loaded := shard.LoadOrStore(key, newItem)
 			if !loaded {
+				d.NotifyObservers(key)
 				return len(newValue), nil
 			}
-			// If loaded, retry
+			newItem.reset()
+			itemPool.Put(newItem)
 			_ = actual
 		}
 	}
@@ -165,50 +259,26 @@ func (d *DistributedMap) Append(key string, value string) (int, error) {
 
 // StrLen returns the length of the string value stored at key.
 func (d *DistributedMap) StrLen(key string) (int, error) {
-	val, ok := d.Get(key)
+	shard := d.getShard(key)
+	val, ok := shard.Load(key)
 	if !ok {
 		return 0, nil
 	}
 
-	strVal, ok := val.(string)
-	if !ok {
+	item := val.(*Item)
+	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
+		shard.Delete(key)
+		d.NotifyObservers(key)
+		item.reset()
+		itemPool.Put(item)
+		return 0, nil
+	}
+
+	if item.Type != TypeString {
 		return 0, ErrNotString
 	}
 
-	return len(strVal), nil
+	return len(item.Str), nil
 }
 
-// Helper to convert interface{} to int64
-func toInt64(val interface{}) (int64, error) {
-	switch v := val.(type) {
-	case int:
-		return int64(v), nil
-	case int8:
-		return int64(v), nil
-	case int16:
-		return int64(v), nil
-	case int32:
-		return int64(v), nil
-	case int64:
-		return v, nil
-	case uint:
-		return int64(v), nil
-	case uint8:
-		return int64(v), nil
-	case uint16:
-		return int64(v), nil
-	case uint32:
-		return int64(v), nil
-	case uint64:
-		// Potential overflow if uint64 is too large for int64, but Redis strings are signed 64 bit usually.
-		return int64(v), nil
-	case string:
-		i, err := strconv.ParseInt(v, 10, 64)
-		if err != nil {
-			return 0, ErrNotInteger
-		}
-		return i, nil
-	default:
-		return 0, ErrNotInteger
-	}
-}
+// Helper to convert interface{} to int64 (Removed, not needed with strict typing)

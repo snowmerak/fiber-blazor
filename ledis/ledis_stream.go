@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -15,68 +14,85 @@ type StreamEntry struct {
 }
 
 type Stream struct {
-	mu      sync.RWMutex
 	Entries []StreamEntry
 	lastID  string
 }
 
-func NewStream() *Stream {
+func newStream() *Stream {
 	return &Stream{
 		Entries: make([]StreamEntry, 0),
 		lastID:  "0-0",
 	}
 }
 
-// Helper to get or create Stream
-func (d *DistributedMap) getOrCreateStream(key string) (*Stream, error) {
+// Helper to get stream item if exists
+func (d *DistributedMap) getStreamItem(key string) (*Item, error) {
 	shard := d.getShard(key)
 	val, ok := shard.Load(key)
 	if !ok {
-		s := NewStream()
-		val, loaded := shard.LoadOrStore(key, Item{Value: s, ExpiresAt: 0})
-		if loaded {
-			item := val.(Item)
-			if sVal, ok := item.Value.(*Stream); ok {
-				return sVal, nil
-			}
-			return nil, ErrWrongType
-		}
-		return s, nil
+		return nil, nil // Not found
 	}
 
-	item := val.(Item)
+	item := val.(*Item)
 	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
-		s := NewStream()
-		shard.Store(key, Item{Value: s, ExpiresAt: 0})
-		return s, nil
+		shard.Delete(key)
+		d.NotifyObservers(key)
+		// item.reset()
+		// itemPool.Put(item)
+		return nil, nil
 	}
 
-	s, ok := item.Value.(*Stream)
-	if !ok {
+	if item.Type != TypeStream {
 		return nil, ErrWrongType
 	}
-	return s, nil
+	return item, nil
 }
 
-// Helper to get Stream if exists
-func (d *DistributedMap) getStream(key string) (*Stream, error) {
+// Helper to get or create a stream item
+func (d *DistributedMap) getOrCreateStreamItem(key string) (*Item, error) {
 	shard := d.getShard(key)
-	val, ok := shard.Load(key)
-	if !ok {
-		return nil, nil
+	val, loaded := shard.Load(key)
+
+	if loaded {
+		item := val.(*Item)
+		if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
+			shard.Delete(key)
+			d.NotifyObservers(key)
+			// item.reset()
+			// itemPool.Put(item)
+			loaded = false
+		} else {
+			if item.Type != TypeStream {
+				return nil, ErrWrongType
+			}
+			return item, nil
+		}
 	}
 
-	item := val.(Item)
-	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
-		d.Del(key)
-		return nil, nil
+	// Create new
+	newItem := itemPool.Get().(*Item)
+	newItem.reset()
+	newItem.Type = TypeStream
+	newItem.Stream = newStream()
+	newItem.ExpiresAt = 0
+
+	actual, loaded := shard.LoadOrStore(key, newItem)
+	if loaded {
+		newItem.reset()
+		itemPool.Put(newItem)
+
+		item := actual.(*Item)
+		if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
+			return d.getOrCreateStreamItem(key)
+		}
+		if item.Type != TypeStream {
+			return nil, ErrWrongType
+		}
+		return item, nil
 	}
 
-	s, ok := item.Value.(*Stream)
-	if !ok {
-		return nil, ErrWrongType
-	}
-	return s, nil
+	d.NotifyObservers(key)
+	return newItem, nil
 }
 
 // parseID parses "123-456" into (123, 456).
@@ -125,13 +141,7 @@ func (s *Stream) generateID(id string) (string, error) {
 
 		seq := uint64(0)
 		if ts < lastTs {
-			// Clock skew? Redis allows this if sequence increments?
-			// But for auto-ID, we usually use max(lastTs, now)
-			// Redis logic: if timestamp is same as last, inc seq.
-			// If timestamp > last, seq = 0.
-			// Getting strictly larger ID is the requirement.
-			ts = lastTs // Force forward?
-			// Actually strict monotonic check happens later.
+			ts = lastTs
 		}
 
 		if ts == lastTs {
@@ -154,13 +164,19 @@ func (d *DistributedMap) XAdd(key string, id string, fields ...string) (string, 
 		return "", errors.New("wrong number of arguments for XADD")
 	}
 
-	s, err := d.getOrCreateStream(key)
+	item, err := d.getOrCreateStreamItem(key)
 	if err != nil {
 		return "", err
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	item.Mu.Lock()
+	defer item.Mu.Unlock()
+
+	s := item.Stream
+	if s == nil {
+		s = newStream()
+		item.Stream = s
+	}
 
 	newID, err := s.generateID(id)
 	if err != nil {
@@ -189,32 +205,42 @@ func (d *DistributedMap) XAdd(key string, id string, fields ...string) (string, 
 
 // XLen returns the number of entries in the stream.
 func (d *DistributedMap) XLen(key string) (int64, error) {
-	s, err := d.getStream(key)
+	item, err := d.getStreamItem(key)
 	if err != nil {
 		return 0, err
 	}
-	if s == nil {
+	if item == nil {
 		return 0, nil
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
+
+	s := item.Stream
+	if s == nil {
+		return 0, nil
+	}
 
 	return int64(len(s.Entries)), nil
 }
 
 // XRange returns entries within a range [start, end].
 func (d *DistributedMap) XRange(key, start, end string) ([]StreamEntry, error) {
-	s, err := d.getOrCreateStream(key)
+	item, err := d.getStreamItem(key)
 	if err != nil {
 		return nil, err
 	}
-	if s == nil {
+	if item == nil {
 		return []StreamEntry{}, nil
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
+
+	s := item.Stream
+	if s == nil {
+		return []StreamEntry{}, nil
+	}
 
 	if start == "-" {
 		start = "0-0"
@@ -238,16 +264,21 @@ func (d *DistributedMap) XRange(key, start, end string) ([]StreamEntry, error) {
 
 // XRevRange returns entries in reverse order.
 func (d *DistributedMap) XRevRange(key, end, start string) ([]StreamEntry, error) {
-	s, err := d.getOrCreateStream(key)
+	item, err := d.getStreamItem(key)
 	if err != nil {
 		return nil, err
 	}
-	if s == nil {
+	if item == nil {
 		return []StreamEntry{}, nil
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
+
+	s := item.Stream
+	if s == nil {
+		return []StreamEntry{}, nil
+	}
 
 	if start == "-" {
 		start = "0-0"
@@ -278,15 +309,21 @@ func (d *DistributedMap) XRead(streams map[string]string, count int) (map[string
 	result := make(map[string][]StreamEntry)
 
 	for key, lastID := range streams {
-		s, err := d.getStream(key)
+		item, err := d.getStreamItem(key)
 		if err != nil {
 			return nil, err
 		}
-		if s == nil {
+		if item == nil {
 			continue
 		}
 
-		s.mu.RLock()
+		item.Mu.RLock()
+		s := item.Stream
+		if s == nil {
+			item.Mu.RUnlock()
+			continue
+		}
+
 		entries := make([]StreamEntry, 0)
 		for _, entry := range s.Entries {
 			if compareIDs(entry.ID, lastID) > 0 {
@@ -296,7 +333,7 @@ func (d *DistributedMap) XRead(streams map[string]string, count int) (map[string
 				}
 			}
 		}
-		s.mu.RUnlock()
+		item.Mu.RUnlock()
 
 		if len(entries) > 0 {
 			result[key] = entries

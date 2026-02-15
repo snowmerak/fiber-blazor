@@ -2,7 +2,6 @@ package ledis
 
 import (
 	"math/rand"
-	"sync"
 	"time"
 )
 
@@ -29,8 +28,8 @@ type zskiplist struct {
 	level        int
 }
 
-type ZSet struct {
-	mu   sync.RWMutex
+// SortedSet structure to hold the skip list and dictionary
+type SortedSet struct {
 	dict map[string]float64
 	zsl  *zskiplist
 }
@@ -228,52 +227,100 @@ func (zsl *zskiplist) zslLastInRange(min, max float64) *zskiplistNode {
 	return x
 }
 
-func NewZSet() *ZSet {
-	return &ZSet{
+func newSortedSet() *SortedSet {
+	return &SortedSet{
 		dict: make(map[string]float64),
 		zsl:  zslCreate(),
 	}
 }
 
-// Helper to get or create ZSet
-func (d *DistributedMap) getOrCreateZSet(key string) (*ZSet, error) {
+// Helper to get zset item if exists
+func (d *DistributedMap) getZSetItem(key string) (*Item, error) {
 	shard := d.getShard(key)
 	val, ok := shard.Load(key)
 	if !ok {
-		z := NewZSet()
-		val, loaded := shard.LoadOrStore(key, Item{Value: z, ExpiresAt: 0})
-		if loaded {
-			item := val.(Item)
-			if zVal, ok := item.Value.(*ZSet); ok {
-				return zVal, nil
-			}
-			return nil, ErrWrongType
-		}
-		return z, nil
+		return nil, nil // Not found
 	}
-	item := val.(Item)
+
+	item := val.(*Item)
 	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
-		z := NewZSet()
-		shard.Store(key, Item{Value: z, ExpiresAt: 0})
-		return z, nil
+		shard.Delete(key)
+		d.NotifyObservers(key)
+		// item.reset()
+		// itemPool.Put(item)
+		return nil, nil
 	}
-	z, ok := item.Value.(*ZSet)
-	if !ok {
+
+	if item.Type != TypeZSet {
 		return nil, ErrWrongType
 	}
-	return z, nil
+	return item, nil
+}
+
+// Helper to get or create a zset item
+func (d *DistributedMap) getOrCreateZSetItem(key string) (*Item, error) {
+	shard := d.getShard(key)
+	val, loaded := shard.Load(key)
+
+	if loaded {
+		item := val.(*Item)
+		if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
+			shard.Delete(key)
+			d.NotifyObservers(key)
+			// item.reset()
+			// itemPool.Put(item)
+			loaded = false
+		} else {
+			if item.Type != TypeZSet {
+				return nil, ErrWrongType
+			}
+			return item, nil
+		}
+	}
+
+	// Create new
+	newItem := itemPool.Get().(*Item)
+	newItem.reset()
+	newItem.Type = TypeZSet
+	newItem.ZSet = newSortedSet()
+	newItem.ExpiresAt = 0
+
+	actual, loaded := shard.LoadOrStore(key, newItem)
+	if loaded {
+		// Race lost
+		newItem.reset()
+		itemPool.Put(newItem) // Return unused
+
+		item := actual.(*Item)
+		if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
+			return d.getOrCreateZSetItem(key)
+		}
+		if item.Type != TypeZSet {
+			return nil, ErrWrongType
+		}
+		return item, nil
+	}
+
+	d.NotifyObservers(key)
+	return newItem, nil
 }
 
 // Commands
 
 func (d *DistributedMap) ZAdd(key string, score float64, member string) (int, error) {
-	z, err := d.getOrCreateZSet(key)
+	item, err := d.getOrCreateZSetItem(key)
 	if err != nil {
 		return 0, err
 	}
 
-	z.mu.Lock()
-	defer z.mu.Unlock()
+	item.Mu.Lock()
+	defer item.Mu.Unlock()
+
+	z := item.ZSet
+	if z == nil {
+		z = newSortedSet()
+		item.ZSet = z
+	}
 
 	added := 0
 	if oldScore, ok := z.dict[member]; ok {
@@ -290,23 +337,20 @@ func (d *DistributedMap) ZAdd(key string, score float64, member string) (int, er
 }
 
 func (d *DistributedMap) ZRem(key string, members ...string) (int, error) {
-	shard := d.getShard(key)
-	val, ok := shard.Load(key)
-	if !ok {
-		return 0, nil
+	item, err := d.getZSetItem(key)
+	if err != nil {
+		return 0, err
 	}
-	item := val.(Item)
-	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
-		d.Del(key)
+	if item == nil {
 		return 0, nil
-	}
-	z, ok := item.Value.(*ZSet)
-	if !ok {
-		return 0, ErrWrongType
 	}
 
-	z.mu.Lock()
-	defer z.mu.Unlock()
+	item.Mu.Lock()
+
+	z := item.ZSet
+	if z == nil {
+		return 0, nil
+	}
 
 	removed := 0
 	for _, m := range members {
@@ -317,65 +361,70 @@ func (d *DistributedMap) ZRem(key string, members ...string) (int, error) {
 		}
 	}
 
-	if len(z.dict) == 0 {
+	isEmpty := len(z.dict) == 0
+	item.Mu.Unlock()
+
+	if isEmpty {
 		d.Del(key)
 	}
 	return removed, nil
 }
 
 func (d *DistributedMap) ZScore(key string, member string) (float64, bool, error) {
-	shard := d.getShard(key)
-	val, ok := shard.Load(key)
-	if !ok {
-		return 0, false, nil
+	item, err := d.getZSetItem(key)
+	if err != nil {
+		return 0, false, err
 	}
-	item := val.(Item)
-	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
-		d.Del(key)
+	if item == nil {
 		return 0, false, nil
-	}
-	z, ok := item.Value.(*ZSet)
-	if !ok {
-		return 0, false, ErrWrongType
 	}
 
-	z.mu.RLock()
-	defer z.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
+
+	z := item.ZSet
+	if z == nil {
+		return 0, false, nil
+	}
 
 	score, exists := z.dict[member]
 	return score, exists, nil
 }
 
 func (d *DistributedMap) ZCard(key string) (int64, error) {
-	shard := d.getShard(key)
-	val, ok := shard.Load(key)
-	if !ok {
-		return 0, nil
+	item, err := d.getZSetItem(key)
+	if err != nil {
+		return 0, err
 	}
-	item := val.(Item)
-	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
-		d.Del(key)
+	if item == nil {
 		return 0, nil
-	}
-	z, ok := item.Value.(*ZSet)
-	if !ok {
-		return 0, ErrWrongType
 	}
 
-	z.mu.RLock()
-	defer z.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
+
+	z := item.ZSet
+	if z == nil {
+		return 0, nil
+	}
 
 	return z.zsl.length, nil
 }
 
 func (d *DistributedMap) ZIncrBy(key string, increment float64, member string) (float64, error) {
-	z, err := d.getOrCreateZSet(key)
+	item, err := d.getOrCreateZSetItem(key)
 	if err != nil {
 		return 0, err
 	}
 
-	z.mu.Lock()
-	defer z.mu.Unlock()
+	item.Mu.Lock()
+	defer item.Mu.Unlock()
+
+	z := item.ZSet
+	if z == nil {
+		z = newSortedSet()
+		item.ZSet = z
+	}
 
 	score := increment
 	if oldScore, ok := z.dict[member]; ok {
@@ -397,23 +446,21 @@ func (d *DistributedMap) ZRevRange(key string, start, stop int64, withScores boo
 }
 
 func (d *DistributedMap) zrangeGeneric(key string, start, stop int64, withScores, reverse bool) ([]interface{}, error) {
-	shard := d.getShard(key)
-	val, ok := shard.Load(key)
-	if !ok {
-		return []interface{}{}, nil
+	item, err := d.getZSetItem(key)
+	if err != nil {
+		return nil, err
 	}
-	item := val.(Item)
-	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
-		d.Del(key)
+	if item == nil {
 		return []interface{}{}, nil
-	}
-	z, ok := item.Value.(*ZSet)
-	if !ok {
-		return nil, ErrWrongType
 	}
 
-	z.mu.RLock()
-	defer z.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
+
+	z := item.ZSet
+	if z == nil {
+		return []interface{}{}, nil
+	}
 
 	length := z.zsl.length
 	if start < 0 {
@@ -471,23 +518,21 @@ func (d *DistributedMap) ZRevRangeByScore(key string, max, min float64, withScor
 }
 
 func (d *DistributedMap) zrangeByScoreGeneric(key string, min, max float64, withScores bool, offset, count int64, reverse bool) ([]interface{}, error) {
-	shard := d.getShard(key)
-	val, ok := shard.Load(key)
-	if !ok {
-		return []interface{}{}, nil
+	item, err := d.getZSetItem(key)
+	if err != nil {
+		return nil, err
 	}
-	item := val.(Item)
-	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
-		d.Del(key)
+	if item == nil {
 		return []interface{}{}, nil
-	}
-	z, ok := item.Value.(*ZSet)
-	if !ok {
-		return nil, ErrWrongType
 	}
 
-	z.mu.RLock()
-	defer z.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
+
+	z := item.ZSet
+	if z == nil {
+		return []interface{}{}, nil
+	}
 
 	if count == 0 {
 		return []interface{}{}, nil
@@ -548,23 +593,21 @@ func (d *DistributedMap) zrangeByScoreGeneric(key string, min, max float64, with
 // ZRank/ZRevRank
 
 func (d *DistributedMap) ZRank(key string, member string) (int64, error) {
-	shard := d.getShard(key)
-	val, ok := shard.Load(key)
-	if !ok {
+	item, err := d.getZSetItem(key)
+	if err != nil {
 		return -1, nil
 	}
-	item := val.(Item)
-	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
-		d.Del(key)
+	if item == nil {
 		return -1, nil
-	}
-	z, ok := item.Value.(*ZSet)
-	if !ok {
-		return -1, ErrWrongType
 	}
 
-	z.mu.RLock()
-	defer z.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
+
+	z := item.ZSet
+	if z == nil {
+		return -1, nil
+	}
 
 	score, exists := z.dict[member]
 	if !exists {
@@ -576,23 +619,21 @@ func (d *DistributedMap) ZRank(key string, member string) (int64, error) {
 }
 
 func (d *DistributedMap) ZRevRank(key string, member string) (int64, error) {
-	shard := d.getShard(key)
-	val, ok := shard.Load(key)
-	if !ok {
+	item, err := d.getZSetItem(key)
+	if err != nil {
 		return -1, nil
 	}
-	item := val.(Item)
-	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
-		d.Del(key)
+	if item == nil {
 		return -1, nil
-	}
-	z, ok := item.Value.(*ZSet)
-	if !ok {
-		return -1, ErrWrongType
 	}
 
-	z.mu.RLock()
-	defer z.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
+
+	z := item.ZSet
+	if z == nil {
+		return -1, nil
+	}
 
 	score, exists := z.dict[member]
 	if !exists {
@@ -612,41 +653,49 @@ func (d *DistributedMap) ZInterStore(destination string, keys ...string) (int64,
 
 	maps := make([]map[string]float64, len(keys))
 
+	// Fetch all sets/zsets
+	// Logic to load *Item from keys
+	// NOTE: We need to handle TypeSet and TypeZSet.
+
 	for i, key := range keys {
 		shard := d.getShard(key)
 		val, ok := shard.Load(key)
 		if !ok {
+			// One key missing => Intersection empty
 			d.Del(destination)
 			return 0, nil
 		}
-		item := val.(Item)
+		item := val.(*Item)
 		if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
 			d.Del(key)
 			d.Del(destination)
+			d.NotifyObservers(key)
 			return 0, nil
 		}
 
 		m := make(map[string]float64)
 
-		switch v := item.Value.(type) {
-		case *ZSet:
-			v.mu.RLock()
-			for member, score := range v.dict {
-				m[member] = score
-			}
-			v.mu.RUnlock()
-		case *Set:
-			v.mu.RLock()
-			for member := range v.Data {
-				strMember, ok := member.(string)
-				if ok {
-					m[strMember] = 1.0
+		item.Mu.RLock()
+		if item.Type == TypeZSet {
+			if item.ZSet != nil {
+				for member, score := range item.ZSet.dict {
+					m[member] = score
 				}
 			}
-			v.mu.RUnlock()
-		default:
+		} else if item.Type == TypeSet {
+			// Access set data
+			// item.Set is map[string]struct{}
+			if item.Set != nil {
+				for member := range item.Set {
+					m[member] = 1.0 // Default score for SET
+				}
+			}
+		} else {
+			item.Mu.RUnlock()
 			return 0, ErrWrongType
 		}
+		item.Mu.RUnlock()
+
 		maps[i] = m
 	}
 
@@ -682,14 +731,27 @@ func (d *DistributedMap) ZInterStore(destination string, keys ...string) (int64,
 		return 0, nil
 	}
 
-	z := NewZSet()
+	// Create new ZSet for destination
+	// We can't use getOrCreateZSetItem because we want to overwrite fully
+	// or create new.
+	dbItem := itemPool.Get().(*Item)
+	dbItem.reset()
+	dbItem.Type = TypeZSet
+	dbItem.ZSet = newSortedSet()
+	dbItem.ExpiresAt = 0
+
 	for m, s := range result {
-		z.dict[m] = s
-		z.zsl.insert(s, m)
+		dbItem.ZSet.dict[m] = s
+		dbItem.ZSet.zsl.insert(s, m)
 	}
 
 	shard := d.getShard(destination)
-	shard.Store(destination, Item{Value: z, ExpiresAt: 0})
+
+	// Delete old
+	d.Del(destination)
+	// Store new
+	shard.Store(destination, dbItem)
+	d.NotifyObservers(destination)
 
 	return int64(len(result)), nil
 }

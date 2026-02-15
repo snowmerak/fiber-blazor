@@ -2,85 +2,117 @@ package ledis
 
 import (
 	"errors"
-	"sync"
+	"fmt"
+	"strconv"
 	"time"
 )
 
-type Hash struct {
-	mu   sync.RWMutex
-	Data map[string]interface{}
-}
-
-func NewHash() *Hash {
-	return &Hash{
-		Data: make(map[string]interface{}),
-	}
-}
-
-// Helper to get or create a hash
-func (d *DistributedMap) getOrCreateHash(key string) (*Hash, error) {
-	shard := d.getShard(key)
-	val, ok := shard.Load(key)
-	if !ok {
-		h := NewHash()
-		val, loaded := shard.LoadOrStore(key, Item{Value: h, ExpiresAt: 0})
-		if loaded {
-			item := val.(Item)
-			if hVal, ok := item.Value.(*Hash); ok {
-				return hVal, nil
-			}
-			return nil, ErrWrongType
-		}
-		return h, nil
-	}
-
-	item := val.(Item)
-	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
-		h := NewHash()
-		shard.Store(key, Item{Value: h, ExpiresAt: 0})
-		return h, nil
-	}
-
-	h, ok := item.Value.(*Hash)
-	if !ok {
-		return nil, ErrWrongType
-	}
-	return h, nil
-}
-
-// Helper to get hash if exists
-func (d *DistributedMap) getHash(key string) (*Hash, error) {
+// Helper to get hash item if exists
+func (d *DistributedMap) getHashItem(key string) (*Item, error) {
 	shard := d.getShard(key)
 	val, ok := shard.Load(key)
 	if !ok {
 		return nil, nil // Not found
 	}
 
-	item := val.(Item)
+	item := val.(*Item)
 	if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
 		shard.Delete(key)
+		d.NotifyObservers(key)
+		// item.reset()
+		// itemPool.Put(item)
 		return nil, nil
 	}
 
-	h, ok := item.Value.(*Hash)
-	if !ok {
+	if item.Type != TypeHash {
 		return nil, ErrWrongType
 	}
-	return h, nil
+	return item, nil
+}
+
+// Helper to get or create a hash item
+func (d *DistributedMap) getOrCreateHashItem(key string) (*Item, error) {
+	shard := d.getShard(key)
+	val, loaded := shard.Load(key)
+
+	if loaded {
+		item := val.(*Item)
+		if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
+			// Expired, treat as new
+			// We can reuse this item if we want, but "Load" returned it.
+			// Simpler to delete and create new or reset it.
+			// Let's reset it in place?
+			// But we need to lock it to reset it safely if others are reading.
+			// Or just remove and create new.
+			shard.Delete(key)
+			d.NotifyObservers(key)
+			// item.reset()
+			// itemPool.Put(item)
+			loaded = false
+		} else {
+			if item.Type != TypeHash {
+				return nil, ErrWrongType
+			}
+			return item, nil
+		}
+	}
+
+	// Create new
+	newItem := itemPool.Get().(*Item)
+	newItem.reset()
+	newItem.Type = TypeHash
+	newItem.Hash = make(map[string]string)
+	newItem.ExpiresAt = 0
+
+	actual, loaded := shard.LoadOrStore(key, newItem)
+	if loaded {
+		// Race lost, use actual
+		newItem.reset()
+		itemPool.Put(newItem)
+
+		item := actual.(*Item)
+		if item.ExpiresAt > 0 && item.ExpiresAt < time.Now().UnixNano() {
+			// Expired right after load?
+			// Handle as if new?
+			// Recursive retry is safest.
+			return d.getOrCreateHashItem(key)
+		}
+		if item.Type != TypeHash {
+			return nil, ErrWrongType
+		}
+		return item, nil
+	}
+
+	d.NotifyObservers(key)
+	return newItem, nil
 }
 
 // HSet sets field in the hash stored at key to value.
 func (d *DistributedMap) HSet(key string, field string, value interface{}) (int, error) {
-	h, err := d.getOrCreateHash(key)
+	// Convert value to string
+	strVal := ""
+	switch v := value.(type) {
+	case string:
+		strVal = v
+	default:
+		strVal = fmt.Sprintf("%v", v)
+	}
+
+	item, err := d.getOrCreateHashItem(key)
 	if err != nil {
 		return 0, err
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	item.Mu.Lock()
+	defer item.Mu.Unlock()
 
-	_, exists := h.Data[field]
-	h.Data[field] = value
+	// Double check type in case of weird race/corruption (unlikely with helpers)
+	if item.Hash == nil {
+		item.Hash = make(map[string]string)
+	}
+
+	_, exists := item.Hash[field]
+	item.Hash[field] = strVal
 
 	if exists {
 		return 0, nil
@@ -90,42 +122,52 @@ func (d *DistributedMap) HSet(key string, field string, value interface{}) (int,
 
 // HGet returns the value associated with field in the hash stored at key.
 func (d *DistributedMap) HGet(key string, field string) (interface{}, error) {
-	h, err := d.getHash(key)
+	item, err := d.getHashItem(key)
 	if err != nil {
-		return nil, err
+		return nil, err // ErrWrongType
 	}
-	if h == nil {
+	if item == nil {
 		return nil, nil
 	}
 
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
 
-	return h.Data[field], nil
+	if item.Hash == nil {
+		return nil, nil // Should not happen for valid TypeHash
+	}
+
+	val, ok := item.Hash[field]
+	if !ok {
+		return nil, nil
+	}
+	return val, nil
 }
 
 // HDel removes the specified fields from the hash stored at key.
 func (d *DistributedMap) HDel(key string, fields ...string) (int, error) {
-	h, err := d.getHash(key)
+	item, err := d.getHashItem(key)
 	if err != nil {
 		return 0, err
 	}
-	if h == nil {
+	if item == nil {
 		return 0, nil
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	item.Mu.Lock()
 
 	count := 0
 	for _, f := range fields {
-		if _, ok := h.Data[f]; ok {
-			delete(h.Data, f)
+		if _, ok := item.Hash[f]; ok {
+			delete(item.Hash, f)
 			count++
 		}
 	}
 
-	if len(h.Data) == 0 {
+	isEmpty := len(item.Hash) == 0
+	item.Mu.Unlock()
+
+	if isEmpty {
 		d.Del(key)
 	}
 
@@ -134,91 +176,106 @@ func (d *DistributedMap) HDel(key string, fields ...string) (int, error) {
 
 // HExists returns if field is an existing field in the hash.
 func (d *DistributedMap) HExists(key string, field string) (bool, error) {
-	h, err := d.getHash(key)
+	item, err := d.getHashItem(key)
 	if err != nil {
 		return false, err
 	}
-	if h == nil {
+	if item == nil {
 		return false, nil
 	}
 
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
 
-	_, ok := h.Data[field]
+	_, ok := item.Hash[field]
 	return ok, nil
 }
 
 // HLen returns the number of fields contained in the hash.
 func (d *DistributedMap) HLen(key string) (int, error) {
-	h, err := d.getHash(key)
+	item, err := d.getHashItem(key)
 	if err != nil {
 		return 0, err
 	}
-	if h == nil {
+	if item == nil {
 		return 0, nil
 	}
 
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
 
-	return len(h.Data), nil
+	return len(item.Hash), nil
 }
 
 // HMSet sets the specified fields to their respective values.
 func (d *DistributedMap) HMSet(key string, pairs map[string]interface{}) error {
-	h, err := d.getOrCreateHash(key)
+	item, err := d.getOrCreateHashItem(key)
 	if err != nil {
 		return err
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	item.Mu.Lock()
+	defer item.Mu.Unlock()
+
+	if item.Hash == nil {
+		item.Hash = make(map[string]string)
+	}
 
 	for k, v := range pairs {
-		h.Data[k] = v
+		strVal := ""
+		switch val := v.(type) {
+		case string:
+			strVal = val
+		default:
+			strVal = fmt.Sprintf("%v", val)
+		}
+		item.Hash[k] = strVal
 	}
 	return nil
 }
 
 // HMGet returns the values associated with the specified fields.
 func (d *DistributedMap) HMGet(key string, fields ...string) ([]interface{}, error) {
-	h, err := d.getHash(key)
+	item, err := d.getHashItem(key)
 	if err != nil {
 		return nil, err
 	}
 
 	result := make([]interface{}, len(fields))
 
-	if h == nil {
+	if item == nil {
 		return result, nil // All nil
 	}
 
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
 
 	for i, f := range fields {
-		result[i] = h.Data[f]
+		if val, ok := item.Hash[f]; ok {
+			result[i] = val
+		} else {
+			result[i] = nil
+		}
 	}
 	return result, nil
 }
 
 // HGetAll returns all fields and values of the hash.
 func (d *DistributedMap) HGetAll(key string) (map[string]interface{}, error) {
-	h, err := d.getHash(key)
+	item, err := d.getHashItem(key)
 	if err != nil {
 		return nil, err
 	}
-	if h == nil {
+	if item == nil {
 		return make(map[string]interface{}), nil
 	}
 
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
 
 	// Copy to match snapshot isolation semantic
-	result := make(map[string]interface{}, len(h.Data))
-	for k, v := range h.Data {
+	result := make(map[string]interface{}, len(item.Hash))
+	for k, v := range item.Hash {
 		result[k] = v
 	}
 	return result, nil
@@ -226,19 +283,19 @@ func (d *DistributedMap) HGetAll(key string) (map[string]interface{}, error) {
 
 // HKeys returns all field names in the hash.
 func (d *DistributedMap) HKeys(key string) ([]string, error) {
-	h, err := d.getHash(key)
+	item, err := d.getHashItem(key)
 	if err != nil {
 		return nil, err
 	}
-	if h == nil {
+	if item == nil {
 		return []string{}, nil
 	}
 
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
 
-	keys := make([]string, 0, len(h.Data))
-	for k := range h.Data {
+	keys := make([]string, 0, len(item.Hash))
+	for k := range item.Hash {
 		keys = append(keys, k)
 	}
 	return keys, nil
@@ -246,19 +303,19 @@ func (d *DistributedMap) HKeys(key string) ([]string, error) {
 
 // HVals returns all values in the hash.
 func (d *DistributedMap) HVals(key string) ([]interface{}, error) {
-	h, err := d.getHash(key)
+	item, err := d.getHashItem(key)
 	if err != nil {
 		return nil, err
 	}
-	if h == nil {
+	if item == nil {
 		return []interface{}{}, nil
 	}
 
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	item.Mu.RLock()
+	defer item.Mu.RUnlock()
 
-	vals := make([]interface{}, 0, len(h.Data))
-	for _, v := range h.Data {
+	vals := make([]interface{}, 0, len(item.Hash))
+	for _, v := range item.Hash {
 		vals = append(vals, v)
 	}
 	return vals, nil
@@ -266,29 +323,31 @@ func (d *DistributedMap) HVals(key string) ([]interface{}, error) {
 
 // HIncrBy increments the integer value of a hash field by the given number.
 func (d *DistributedMap) HIncrBy(key string, field string, amount int64) (int64, error) {
-	h, err := d.getOrCreateHash(key)
+	item, err := d.getOrCreateHashItem(key)
 	if err != nil {
 		return 0, err
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	item.Mu.Lock()
+	defer item.Mu.Unlock()
 
-	val, ok := h.Data[field]
+	if item.Hash == nil {
+		item.Hash = make(map[string]string)
+	}
+
+	val, ok := item.Hash[field]
 	var current int64
 	if !ok {
 		current = 0
 	} else {
-		// reuse toInt64 from ledis_string.go?
-		// it is in the same package `ledis`.
-		current, err = toInt64(val)
+		current, err = toInt64(val) // val is string
 		if err != nil {
 			return 0, err
 		}
 	}
 
 	newValue := current + amount
-	h.Data[field] = newValue
+	item.Hash[field] = strconv.FormatInt(newValue, 10)
 	return newValue, nil
 }
 

@@ -40,7 +40,7 @@ func TestListBasics(t *testing.T) {
 	}
 
 	vals, _ = db.LRange(key, 0, -1)
-	expected = []interface{}{"c", "b", "a", 1, 2}
+	expected = []interface{}{"c", "b", "a", "1", "2"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("RPush order wrong. Expected %v, got %v", expected, vals)
 	}
@@ -68,13 +68,13 @@ func TestListBasics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RPop failed: %v", err)
 	}
-	if val != 2 {
-		t.Errorf("Expected 2, got %v", val)
+	if val != "2" {
+		t.Errorf("Expected '2', got %v", val)
 	}
 
 	// Remaining: [b, a, 1]
 	vals, _ = db.LRange(key, 0, -1)
-	expected = []interface{}{"b", "a", 1}
+	expected = []interface{}{"b", "a", "1"}
 	if !reflect.DeepEqual(vals, expected) {
 		t.Errorf("List state wrong after pops. Expected %v, got %v", expected, vals)
 	}
