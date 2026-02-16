@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/RoaringBitmap/roaring/roaring64"
+	"github.com/axiomhq/hyperloglog"
 	"github.com/panjf2000/ants/v2"
 )
 
@@ -27,12 +28,24 @@ const (
 	TypeZSet
 	TypeStream
 	TypeBitmap
+	TypeGeo
+	TypeHyperLogLog
 )
 
 type ListNode struct {
 	Value string
 	Prev  *ListNode
 	Next  *ListNode
+}
+
+// Geo structures
+type GeoPoint struct {
+	Lat, Lon float64
+}
+
+type Geo struct {
+	members map[string]GeoPoint
+	grid    map[string]map[string]struct{}
 }
 
 type Item struct {
@@ -50,6 +63,8 @@ type Item struct {
 	ZSet     *SortedSet
 	Bitmap   *roaring64.Bitmap
 	Stream   *Stream
+	Geo      *Geo
+	HLL      *hyperloglog.Sketch
 
 	// Waiters for blocking list operations
 	Waiters []chan string
@@ -68,6 +83,8 @@ func (i *Item) reset() {
 	i.ZSet = nil
 	i.Bitmap = nil
 	i.Stream = nil
+	i.Geo = nil
+	i.HLL = nil
 	i.Waiters = nil
 }
 
@@ -129,6 +146,9 @@ type DistributedMap struct {
 	evictCtx    context.Context
 	evictCancel context.CancelFunc
 	wg          sync.WaitGroup
+
+	// AOF
+	aof *AOFWriter
 }
 
 type Observer interface {
@@ -240,6 +260,22 @@ func New(size int) *DistributedMap {
 		WorkerPool:        pool,
 	}
 
+	// Initialize AOF (Hardcoded filename for now, or optional?)
+	// Implementation plan said "Update New in ledis.go to init AOF"
+	// Let's use "appendonly.aof" as default if we want it always on,
+	// or maybe add config later. For now, let's enable it by default or via option?
+	// User didn't specify config. Let's enable default "appendonly.aof".
+	// Initialize and Load AOF
+	if err := d.LoadAOF("appendonly.aof"); err != nil {
+		fmt.Printf("Warning: Failed to load AOF: %v\n", err)
+	}
+
+	if aof, err := NewAOFWriter("appendonly.aof"); err == nil {
+		d.aof = aof
+	} else {
+		fmt.Printf("Warning: Failed to open AOF file: %v\n", err)
+	}
+
 	d.evictCtx, d.evictCancel = context.WithCancel(context.Background())
 	d.wg.Add(1)
 	go d.startEvictLoop()
@@ -255,6 +291,9 @@ func (d *DistributedMap) hash(key string) uint64 {
 }
 
 func (d *DistributedMap) Close() {
+	if d.aof != nil {
+		d.aof.Close()
+	}
 	d.evictCancel()
 	d.wg.Wait()
 	d.WorkerPool.Release()

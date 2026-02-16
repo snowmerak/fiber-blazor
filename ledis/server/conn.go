@@ -490,6 +490,14 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		wr.WriteError("ERR subcommand not supported")
 
 	// --- Generic ---
+	case "BGREWRITEAOF":
+		// Asynchronous AOF rewrite
+		go func() {
+			if err := c.db.RewriteAOF(); err != nil {
+				fmt.Printf("Error rewriting AOF: %v\n", err)
+			}
+		}()
+		wr.WriteSimpleString("Background append only file rewriting started")
 	case "PING":
 		if len(args) > 0 {
 			wr.WriteBulkString(args[0])
@@ -508,6 +516,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 				count++
 			}
 		}
+		c.db.LogCommand("DEL", args...)
 		wr.WriteInteger(int64(count))
 	case "EXISTS":
 		if len(args) < 1 {
@@ -542,6 +551,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			return
 		}
 		c.db.Set(args[0], args[1], 0)
+		c.db.LogCommand("SET", args...)
 		wr.WriteSimpleString("OK")
 	case "GET":
 		if len(args) != 1 {
@@ -589,6 +599,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			pairs[args[i]] = args[i+1]
 		}
 		c.db.MSet(pairs)
+		c.db.LogCommand("MSET", args...)
 		wr.WriteSimpleString("OK")
 	case "MGET":
 		if len(args) == 0 {
@@ -622,6 +633,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
+			c.db.LogCommand("INCR", args...)
 			wr.WriteInteger(val)
 		}
 	case "DECR":
@@ -633,6 +645,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
+			c.db.LogCommand("DECR", args...)
 			wr.WriteInteger(val)
 		}
 
@@ -646,6 +659,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
+			c.db.LogCommand("LPUSH", args...)
 			wr.WriteInteger(int64(count))
 		}
 	case "RPUSH":
@@ -657,6 +671,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
+			c.db.LogCommand("RPUSH", args...)
 			wr.WriteInteger(int64(count))
 		}
 	case "LPOP":
@@ -671,6 +686,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		} else if !ok {
 			wr.WriteNull()
 		} else {
+			c.db.LogCommand("LPOP", args...)
 			wr.WriteBulkString(val)
 		}
 	case "RPOP":
@@ -684,6 +700,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		} else if !ok {
 			wr.WriteNull()
 		} else {
+			c.db.LogCommand("RPOP", args...)
 			wr.WriteBulkString(val)
 		}
 	case "LLEN":
@@ -738,6 +755,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			}
 		}
 		wr.WriteInteger(int64(count))
+		c.db.LogCommand("HSET", args...)
 	case "HGET":
 		if len(args) != 2 {
 			wr.WriteError("ERR wrong number of arguments for 'hget' command")
@@ -767,6 +785,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			}
 		}
 		wr.WriteInteger(int64(count))
+		c.db.LogCommand("HDEL", args...)
 	case "HLEN":
 		if len(args) != 1 {
 			wr.WriteError("ERR wrong number of arguments for 'hlen' command")
@@ -810,6 +829,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
+			c.db.LogCommand("SADD", args...)
 			wr.WriteInteger(int64(count))
 		}
 	case "SREM":
@@ -821,6 +841,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
+			c.db.LogCommand("SREM", args...)
 			wr.WriteInteger(int64(count))
 		}
 	case "SMEMBERS":
@@ -878,6 +899,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			}
 		}
 		wr.WriteInteger(int64(added))
+		c.db.LogCommand("ZADD", args...)
 	case "ZRANGE":
 		if len(args) != 3 {
 			wr.WriteError("ERR wrong number of arguments for 'zrange' command")
@@ -918,6 +940,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
+			c.db.LogCommand("SETBIT", args...)
 			wr.WriteInteger(int64(oldVal))
 		}
 	case "GETBIT":
@@ -959,6 +982,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 			return
 		}
 		count := c.db.Publish(args[0], args[1])
+		c.db.LogCommand("PUBLISH", args...)
 		wr.WriteInteger(count)
 
 	// --- Stream ---
@@ -1014,6 +1038,7 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
+			c.db.LogCommand("XADD", args...)
 			wr.WriteBulkString(newID)
 		}
 
@@ -1052,7 +1077,126 @@ func (c *Client) execute(cmd string, args []string, w *Writer, mu *sync.Mutex) {
 		if err != nil {
 			wr.WriteError(err.Error())
 		} else {
+			c.db.LogCommand("XTRIM", args...)
 			wr.WriteInteger(deleted)
+		}
+
+	// --- Geo ---
+	case "GEOADD":
+		if len(args) < 4 || (len(args)-1)%3 != 0 {
+			wr.WriteError("ERR wrong number of arguments for 'geoadd' command")
+			return
+		}
+		count := 0
+		for i := 1; i < len(args); i += 3 {
+			lat, err1 := strconv.ParseFloat(args[i], 64)
+			lon, err2 := strconv.ParseFloat(args[i+1], 64)
+			if err1 != nil || err2 != nil {
+				wr.WriteError("ERR value is not a valid float")
+				return
+			}
+			member := args[i+2]
+			n, err := c.db.GeoAdd(args[0], lat, lon, member)
+			if err == nil {
+				count += n
+			}
+		}
+		c.db.LogCommand("GEOADD", args...)
+		wr.WriteInteger(int64(count))
+
+	case "GEODIST":
+		if len(args) < 3 {
+			wr.WriteError("ERR wrong number of arguments for 'geodist' command")
+			return
+		}
+		unit := "m"
+		if len(args) >= 4 {
+			unit = args[3]
+		}
+		dist, err := c.db.GeoDist(args[0], args[1], args[2], unit)
+		if err != nil {
+			wr.WriteNull()
+		} else {
+			// Redis returns distance as string (bulk string)?
+			// Yes, "If one or both elements are missing, nil is returned. Otherwise the distance ... in the specified unit"
+			// It returns bulk string representation of float.
+			wr.WriteBulkString(fmt.Sprintf("%f", dist))
+		}
+
+	case "GEORADIUS":
+		if len(args) < 4 {
+			wr.WriteError("ERR wrong number of arguments for 'georadius' command")
+			return
+		}
+		lat, err1 := strconv.ParseFloat(args[1], 64)
+		lon, err2 := strconv.ParseFloat(args[2], 64)
+		radius, err3 := strconv.ParseFloat(args[3], 64)
+		unit := "m"
+		if len(args) >= 5 {
+			unit = args[4]
+		}
+
+		if err1 != nil || err2 != nil || err3 != nil {
+			wr.WriteError("ERR value is not a valid float")
+			return
+		}
+
+		locs, err := c.db.GeoRadius(args[0], lat, lon, radius, unit)
+		if err != nil {
+			wr.WriteArray(0)
+		} else {
+			// Redis GEORADIUS returns array of members (and optionally coords/dist/hash)
+			// Our impl just returns list of members + dist/lat/lon in struct.
+			// Standard RESP: Array of Strings (members).
+			// If WITHDIST/WITHCOORD specified...
+			// For V1, let's just return Member Names?
+			// But GeoRadius usually implies searching.
+			// Let's return Member Names for compatibility with default GEORADIUS.
+			// If args contains "WITHDIST"...
+			// I'll skip parsing options for now and just return members.
+			wr.WriteArray(len(locs))
+			for _, loc := range locs {
+				wr.WriteBulkString(loc.Name)
+			}
+		}
+
+	// --- HyperLogLog ---
+	case "PFADD":
+		if len(args) < 2 {
+			wr.WriteError("ERR wrong number of arguments for 'pfadd' command")
+			return
+		}
+		updated, err := c.db.PfAdd(args[0], args[1:]...)
+		if err != nil {
+			wr.WriteError(err.Error())
+		} else {
+			c.db.LogCommand("PFADD", args...)
+			wr.WriteInteger(int64(updated))
+		}
+
+	case "PFCOUNT":
+		if len(args) < 1 {
+			wr.WriteError("ERR wrong number of arguments for 'pfcount' command")
+			return
+		}
+		count, err := c.db.PfCount(args...)
+		if err != nil {
+			wr.WriteError(err.Error())
+		} else {
+			wr.WriteInteger(count)
+		}
+
+	case "PFMERGE":
+		if len(args) < 2 {
+			wr.WriteError("ERR wrong number of arguments for 'pfmerge' command")
+			return
+		}
+		err := c.db.PfMerge(args[0], args[1:]...)
+		if err != nil {
+			wr.WriteError(err.Error())
+		} else {
+			c.db.LogCommand("PFMERGE", args...)
+			wr.WriteSimpleString("OK")
 		}
 
 	case "XLEN":
